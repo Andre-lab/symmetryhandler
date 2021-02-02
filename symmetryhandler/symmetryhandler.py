@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # coding=utf-8
-from lib.mathfunctions import rotation_matrix
-from lib.mathfunctions import rotate
+from mathfunctions import rotation_matrix
+from mathfunctions import rotate
 import copy
 import textwrap
 import numpy as np
+import xmlrpc.client as xmlrpclib
 
 class UndefinedParameters(BaseException):
     """An exception that reports that the user has undefined parameters. Used in the CoordinateFrame class."""
@@ -338,13 +339,11 @@ class SymmetrySetup:
                 file.write("\n")
         file.close()
 
-    def read_from_file(self, name, apply_dofs=True, mark_jumps=True):
+    def read_from_file(self, name):
         """Reads a symmetry file from disk.
 
         :param name: name of file to read from.
-        :param bool apply_dofs: applies the translational and rotational degrees of freedom specified.
-        :param bool mark_jumps: shows the jumps.
-        :return:
+        :return: None
         """
         file = open(name, 'r')
         for line in file:
@@ -378,26 +377,35 @@ class SymmetrySetup:
             elif line[0] == "set_jump_group":
                 self.add_jumpgroup(line[1], *line[2:])
 
-    def print_visualization(self, name, apply_dofs=True, mark_jumps=True):
-        """Prints a python script that can be run in PyMOL to generate a visualization of the symmetric setup.
+    def visualize(self, apply_dofs=True, mark_jumps=True, ip="localhost", port="9123"):
+        """Visualizes the symmetry directly in PyMOL.
 
-        :param str name: name given to the script
-        :param bool apply_dofs: if to apply the degrees of freedom of the symmetric system or not.
-
+        :param bool apply_dofs: applies the translational and rotational degrees of freedom specified.
+        :param bool mark_jumps: shows the jumps.
+        :param str ip: the ip address of the machine where PyMOL is running.
+        :param str ip: the port PyMOL is listening to.
         """
+        cmd = xmlrpclib.ServerProxy(f'http://{ip}:{port}')
+        cmd.do(self.__make_visualization_str(apply_dofs, mark_jumps))
 
-        file = open(name, 'w')
+    def __make_visualization_str(self, apply_dofs=True, mark_jumps=True):
+        """Makes python script as a str that can either be printed to a file or use in PyMOL directly.
+
+        :param bool apply_dofs: applies the translational and rotational degrees of freedom specified.
+        :param bool mark_jumps: shows the jumps.
+        """
+        string = ""
 
         # CGO styles
-        w = 0.06 * 3 # cylinder width
-        w2 = 0.03 # cylinder width for jumps
-        h = 0.06 * 3 # cone height
-        d = 0.13 * 3 # cone base diameter
-        r = 0.12 * 3 # sphere radius
+        w = 0.06 * 3  # cylinder width
+        w2 = 0.03  # cylinder width for jumps
+        h = 0.06 * 3  # cone height
+        d = 0.13 * 3  # cone base diameter
+        r = 0.12 * 3  # sphere radius
         size = 0.01 * 6
         color = [1.0, 1.0, 1.0]  # color
 
-        file.write(textwrap.dedent(
+        string += textwrap.dedent(
             '''
             # to produce vectors and spheres (VRT vectors and positions) in PDB
             from pymol.cgo import *
@@ -417,20 +425,21 @@ class SymmetrySetup:
             # CONE, x0, y0, z0, x1, y1, z1, radius, r1, g1, b1, r1, g1, b1 
 
             ''').format(
-            w, h, d, r, size, color, w2))
+            w, h, d, r, size, color, w2)
 
         # tmr you need to go through all the vrts that are related to a jump. not just the jumpgroup + make sure you
         # understand the how to change the objects in a list.
 
         # if user want to appy dofs and dofs are set then apply the dofs
         if apply_dofs and len(self._dofs) != 0:
-            symmetry_setup = copy.deepcopy(self) # is this important? yes beacuse we are applying dofs now to the symmetry_setup
+            symmetry_setup = copy.deepcopy(
+                self)  # is this important? yes beacuse we are applying dofs now to the symmetry_setup
             # checks that the degrees of freedom set are from the master jumps
             if not symmetry_setup.is_dof_master_jumps():
                 raise ValueError(textwrap.dedent("""
-                                 The degrees of freedom set are not of the master jumps.
-                                 The results will not make sense if not.
-                                 """))
+                                        The degrees of freedom set are not of the master jumps.
+                                        The results will not make sense if not.
+                                        """))
             for jump_to_apply_dof_to, dofs in symmetry_setup._dofs.items():
                 # find the jumpgroup the master jump degree of freedom belongs too
                 for jumpgroup in symmetry_setup._jumpgroups.values():
@@ -462,20 +471,20 @@ class SymmetrySetup:
                             if dof[1] == "translation":
                                 axis = dof[0]
                                 if axis == 'x':
-                                    axis_to_apply_from = - vrt_reference.vrt_x # minus because of Rosettas convention
+                                    axis_to_apply_from = - vrt_reference.vrt_x  # minus because of Rosettas convention
                                 elif axis == 'y':
                                     axis_to_apply_from = vrt_reference.vrt_y
                                 elif axis == 'z':
-                                    axis_to_apply_from = - vrt_reference.vrt_z # minus because of Rosettas convention
+                                    axis_to_apply_from = - vrt_reference.vrt_z  # minus because of Rosettas convention
                                 vrt_to.vrt_orig = vrt_to.vrt_orig + axis_to_apply_from * value
                             elif dof[1] == "rotation":
                                 axis = dof[0]
                                 if axis == 'x':
-                                    axis_to_apply_from = - vrt_reference.vrt_x # minus because of Rosettas convention (i think it applies to rot)
+                                    axis_to_apply_from = - vrt_reference.vrt_x  # minus because of Rosettas convention (i think it applies to rot)
                                 elif axis == 'y':
                                     axis_to_apply_from = vrt_reference.vrt_y
                                 elif axis == 'z':
-                                    axis_to_apply_from = - vrt_reference.vrt_z # minus because of Rosettas convention(i think it applies to rot)
+                                    axis_to_apply_from = - vrt_reference.vrt_z  # minus because of Rosettas convention(i think it applies to rot)
                                 R = rotation_matrix(axis_to_apply_from, value)
                                 vrt_to.vrt_x = rotate(vrt_to.vrt_x, R)
                                 vrt_to.vrt_y = rotate(vrt_to.vrt_y, R)
@@ -492,26 +501,31 @@ class SymmetrySetup:
         axes_norm = 0.3
 
         for counter, vrt in enumerate(symmetry_setup._vrts, 1):
-            file.write(textwrap.dedent(
+            string += "obj{0} = [SPHERE, {1}, r," \
+                      "CYLINDER, {1}, {2}, w, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0," \
+                      "CYLINDER, {1}, {3}, w, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0," \
+                      "CYLINDER, {1}, {4}, w, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, " \
+                      "CONE, {2}, {5}, d, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0," \
+                      "CONE, {3}, {6}, d, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0," \
+                      "CONE, {4}, {7}, d, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,]".format(
+                counter,
+                ','.join(map(str, vrt._vrt_orig)),  # SPHERE
+                ','.join(map(str, vrt._vrt_orig + vrt._vrt_x * 3)),  # CYLINDER
+                ','.join(map(str, vrt._vrt_orig + vrt._vrt_y * 3)),  # CYLINDER
+                ','.join(map(str, vrt._vrt_orig + vrt._vrt_z * 3)),  # CYLINDER
+                ','.join(map(str, vrt._vrt_orig + vrt._vrt_x * p * 3)),  # CONE
+                ','.join(map(str, vrt._vrt_orig + vrt._vrt_y * p * 3)),  # CONE
+                ','.join(map(str, vrt._vrt_orig + vrt._vrt_z * p * 3)))  # CONE
+
+            # TODO: after some refactoring some numbers are not important anymore
+            string += textwrap.dedent(
                 '''
-
-                obj{0} = [
-                SPHERE, {1}, r,
-                CYLINDER, {1},{2}, w, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                CYLINDER, {1},{3}, w, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                CYLINDER, {1},{4}, w, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                CONE, {2},{5}, d, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                CONE, {3},{6}, d, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                CONE, {4},{7}, d, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                   ]
-
                 cyl_text(obj{0},plain,[{8}],'{12}',size, color, {13})
                 cyl_text(obj{0},plain,[{9}],'x',size,color, {13})
                 cyl_text(obj{0},plain,[{10}],'y',size,color, {13})
                 cyl_text(obj{0},plain,[{11}],'z',size,color, {13})
 
                 cmd.load_cgo(obj{0}, '{12}')
-
                 '''.format(
                     counter,
                     ','.join(map(str, vrt._vrt_orig)),  # SPHERE
@@ -529,9 +543,9 @@ class SymmetrySetup:
                     'axes = ' + '[' + str((vrt._vrt_x * axes_norm).tolist()) + ',' + str(
                         (vrt._vrt_y * axes_norm).tolist()) + ',' + str((vrt._vrt_z * axes_norm).tolist()) + ']',
                     # cyl_text
-            )))
+                ))
 
-        #mark jumps:
+        # mark jumps:
         if mark_jumps:
 
             # CGO styles
@@ -542,17 +556,197 @@ class SymmetrySetup:
                 if vrts[1] == "SUBUNIT":
                     continue
                 vrt_to = symmetry_setup.get_vrt_name(vrts[1])
-                file.write(textwrap.dedent((
+                string += textwrap.dedent((
                     """
-                
+
                     obj{0} = [CYLINDER, {1},{2}, w2, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0,]
                     cmd.load_cgo(obj{0}, '{3}')
-                    
+
                     """.format(
                         counter2,
                         ','.join(map(str, vrt_from._vrt_orig)),  # CYLINDER
                         ','.join(map(str, vrt_to._vrt_orig)),  # CYLINDER
                         jump,
-            ))))
+                    )))
+
+        return string
+
+    def print_visualization(self, name, apply_dofs=True, mark_jumps=True):
+        """Prints a python script that can be run in PyMOL to generate a visualization of the symmetric setup.
+
+        :param str name: name given to the script
+        :param bool apply_dofs: if to apply the degrees of freedom of the symmetric system or not.
+        :param bool mark_jumps: shows the jumps.
+        """
+
+        file = open(name, 'w')
+        file.write(self.__make_visualization_str(apply_dofs, mark_jumps))
+
+        # # CGO styles
+        # w = 0.06 * 3 # cylinder width
+        # w2 = 0.03 # cylinder width for jumps
+        # h = 0.06 * 3 # cone height
+        # d = 0.13 * 3 # cone base diameter
+        # r = 0.12 * 3 # sphere radius
+        # size = 0.01 * 6
+        # color = [1.0, 1.0, 1.0]  # color
+        #
+        # file.write(textwrap.dedent(
+        #     '''
+        #     # to produce vectors and spheres (VRT vectors and positions) in PDB
+        #     from pymol.cgo import *
+        #     from pymol import cmd
+        #     from pymol.vfont import plain
+        #
+        #     w = {0} # cylinder width
+        #     w2 = {6} # cylinder width
+        #     h = {1} # cone hight
+        #     d = {2} # cone base diameter
+        #     r = {3} # sphere radius
+        #     size = {4}
+        #     color= {5}
+        #
+        #     # SPHERE, x, y, z,  radius
+        #     # CYLINDER, x1, y1, z1, x2, y2, z2, radius, red1, green1, blue1, red2, green2, blue2,
+        #     # CONE, x0, y0, z0, x1, y1, z1, radius, r1, g1, b1, r1, g1, b1
+        #
+        #     ''').format(
+        #     w, h, d, r, size, color, w2))
+        #
+        # # tmr you need to go through all the vrts that are related to a jump. not just the jumpgroup + make sure you
+        # # understand the how to change the objects in a list.
+        #
+        # # if user want to appy dofs and dofs are set then apply the dofs
+        # if apply_dofs and len(self._dofs) != 0:
+        #     symmetry_setup = copy.deepcopy(self) # is this important? yes beacuse we are applying dofs now to the symmetry_setup
+        #     # checks that the degrees of freedom set are from the master jumps
+        #     if not symmetry_setup.is_dof_master_jumps():
+        #         raise ValueError(textwrap.dedent("""
+        #                          The degrees of freedom set are not of the master jumps.
+        #                          The results will not make sense if not.
+        #                          """))
+        #     for jump_to_apply_dof_to, dofs in symmetry_setup._dofs.items():
+        #         # find the jumpgroup the master jump degree of freedom belongs too
+        #         for jumpgroup in symmetry_setup._jumpgroups.values():
+        #             # check that the dof jump and the first entry (aka master jump) in the jumpgroup is the same
+        #             # they could be out of order and therefore the first defined jump in set_dof might not be the
+        #             # same in set_jump_group. Keep iterating until it is the same.
+        #             # might need to check that none of them matches and output an error
+        #             if jump_to_apply_dof_to == jumpgroup[0]:
+        #                 break
+        #
+        #         # apply dofs to all jumps in the jumpgroup
+        #         for jump in jumpgroup:
+        #             # find all downstream vrt names connected to the jump
+        #             vrts_to_apply_dof_to = symmetry_setup.get_downstream_connections(jump)
+        #             #  Find the reference vrt that the dofs should be applied from
+        #             vrt_reference_name = symmetry_setup._jumps[jump][0]
+        #             vrt_reference = symmetry_setup.get_vrt_name(vrt_reference_name)
+        #
+        #             # now apply the dofs vrts_to_apply_dof_to
+        #             for vrt_to_name in vrts_to_apply_dof_to:
+        #                 if vrt_to_name == "SUBUNIT":
+        #                     continue
+        #                 vrt_to = symmetry_setup.get_vrt_name(vrt_to_name)
+        #                 for dof in dofs:
+        #                     if dof[2] is not None:
+        #                         value = dof[2]
+        #                     else:
+        #                         continue
+        #                     if dof[1] == "translation":
+        #                         axis = dof[0]
+        #                         if axis == 'x':
+        #                             axis_to_apply_from = - vrt_reference.vrt_x # minus because of Rosettas convention
+        #                         elif axis == 'y':
+        #                             axis_to_apply_from = vrt_reference.vrt_y
+        #                         elif axis == 'z':
+        #                             axis_to_apply_from = - vrt_reference.vrt_z # minus because of Rosettas convention
+        #                         vrt_to.vrt_orig = vrt_to.vrt_orig + axis_to_apply_from * value
+        #                     elif dof[1] == "rotation":
+        #                         axis = dof[0]
+        #                         if axis == 'x':
+        #                             axis_to_apply_from = - vrt_reference.vrt_x # minus because of Rosettas convention (i think it applies to rot)
+        #                         elif axis == 'y':
+        #                             axis_to_apply_from = vrt_reference.vrt_y
+        #                         elif axis == 'z':
+        #                             axis_to_apply_from = - vrt_reference.vrt_z # minus because of Rosettas convention(i think it applies to rot)
+        #                         R = rotation_matrix(axis_to_apply_from, value)
+        #                         vrt_to.vrt_x = rotate(vrt_to.vrt_x, R)
+        #                         vrt_to.vrt_y = rotate(vrt_to.vrt_y, R)
+        #                         vrt_to.vrt_z = rotate(vrt_to.vrt_z, R)
+        # else:
+        #     symmetry_setup = self
+        #
+        # # For text position
+        # p = 1.1  # arrow pointiness
+        # name_pos = 0.5
+        # x_pos = 1.2
+        # y_pos = 1.3
+        # z_pos = 1.2
+        # axes_norm = 0.3
+        #
+        # for counter, vrt in enumerate(symmetry_setup._vrts, 1):
+        #     file.write(textwrap.dedent(
+        #         '''
+        #
+        #         obj{0} = [
+        #         SPHERE, {1}, r,
+        #         CYLINDER, {1},{2}, w, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        #         CYLINDER, {1},{3}, w, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        #         CYLINDER, {1},{4}, w, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        #         CONE, {2},{5}, d, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        #         CONE, {3},{6}, d, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        #         CONE, {4},{7}, d, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        #            ]
+        #
+        #         cyl_text(obj{0},plain,[{8}],'{12}',size, color, {13})
+        #         cyl_text(obj{0},plain,[{9}],'x',size,color, {13})
+        #         cyl_text(obj{0},plain,[{10}],'y',size,color, {13})
+        #         cyl_text(obj{0},plain,[{11}],'z',size,color, {13})
+        #
+        #         cmd.load_cgo(obj{0}, '{12}')
+        #
+        #         '''.format(
+        #             counter,
+        #             ','.join(map(str, vrt._vrt_orig)),  # SPHERE
+        #             ','.join(map(str, vrt._vrt_orig + vrt._vrt_x * 3)),  # CYLINDER
+        #             ','.join(map(str, vrt._vrt_orig + vrt._vrt_y * 3)),  # CYLINDER
+        #             ','.join(map(str, vrt._vrt_orig + vrt._vrt_z * 3)),  # CYLINDER
+        #             ','.join(map(str, vrt._vrt_orig + vrt._vrt_x * p * 3)),  # CONE
+        #             ','.join(map(str, vrt._vrt_orig + vrt._vrt_y * p * 3)),  # CONE
+        #             ','.join(map(str, vrt._vrt_orig + vrt._vrt_z * p * 3)),  # CONE
+        #             ','.join(map(str, vrt._vrt_orig - vrt._vrt_y * name_pos * 1.5)),  # cyl_text
+        #             ','.join(map(str, vrt._vrt_orig + vrt._vrt_x * 3 * x_pos)),  # cyl_text
+        #             ','.join(map(str, vrt._vrt_orig + vrt._vrt_y * 3 * y_pos)),  # cyl_text
+        #             ','.join(map(str, vrt._vrt_orig + vrt._vrt_z * 3 * z_pos)),  # cyl_text
+        #             vrt.name,  # name of vrt
+        #             'axes = ' + '[' + str((vrt._vrt_x * axes_norm).tolist()) + ',' + str(
+        #                 (vrt._vrt_y * axes_norm).tolist()) + ',' + str((vrt._vrt_z * axes_norm).tolist()) + ']',
+        #             # cyl_text
+        #     )))
+        #
+        # #mark jumps:
+        # if mark_jumps:
+        #
+        #     # CGO styles
+        #     w = 0.06  # cylinder width
+        #
+        #     for counter2, (jump, vrts) in enumerate(symmetry_setup._jumps.items(), counter):
+        #         vrt_from = symmetry_setup.get_vrt_name(vrts[0])
+        #         if vrts[1] == "SUBUNIT":
+        #             continue
+        #         vrt_to = symmetry_setup.get_vrt_name(vrts[1])
+        #         file.write(textwrap.dedent((
+        #             """
+        #
+        #             obj{0} = [CYLINDER, {1},{2}, w2, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0,]
+        #             cmd.load_cgo(obj{0}, '{3}')
+        #
+        #             """.format(
+        #                 counter2,
+        #                 ','.join(map(str, vrt_from._vrt_orig)),  # CYLINDER
+        #                 ','.join(map(str, vrt_to._vrt_orig)),  # CYLINDER
+        #                 jump,
+        #     ))))
 
         file.close()
