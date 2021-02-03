@@ -21,4 +21,4 @@ Take a look at the *visualization* functions for the SymmetrySetup class. A scri
 
 ![Icosahedral symmetry](images/full.png "Icoshadral symmetry")
 
-![Icosahedral symmetry](images/closeup.png "VRT axes")
+![Axes](images/closeup.png "VRT axes")
