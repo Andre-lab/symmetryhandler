@@ -3,6 +3,7 @@ from distutils.core import setup
 setup(
     name='symmetryhandler',
     version='0.1',
+	scripts=['scripts/visualize_symmetry.py'],
     packages=['symmetryhandler'],
     # package_dir={'':'symmetryhandler'}
     url='https://github.com/Andre-lab/symmetryhandler',
