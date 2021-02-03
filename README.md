@@ -8,7 +8,7 @@ To handcraft a symmetryfile take a look at the SymmetrySetup class.
 
 You can import it as: 
 
-`from symmetryhandler import SymmetrySetup`
+`from symmetryhandler.symmetryhandler import SymmetrySetup`
 
 It has appropiate getters and setters that easily can be used to set jumps and vrts and connect them as well. It can also read in another symmetry file if one needs to modify an existing one. 
 
