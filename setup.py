@@ -12,6 +12,4 @@ setup(
     author_email='mads.jeppesen@biochemistry.lu.se',
     description='Simple utility library to handcraft symmetry files in Rosetta and visualizing them in PyMOL ',
 	install_requires=['numpy']
-   
-
 )
