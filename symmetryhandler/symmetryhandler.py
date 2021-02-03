@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # coding=utf-8
-from lib.mathfunctions import rotation_matrix
-from lib.mathfunctions import rotate
+from .mathfunctions import rotation_matrix
+from .mathfunctions import rotate
 import copy
 import textwrap
 import numpy as np
