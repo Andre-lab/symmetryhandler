@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
 # coding=utf-8
-from .mathfunctions import rotation_matrix
-from .mathfunctions import rotate
+from .mathfunctions import rotation_matrix, rotation_matrix_from_vector_to_vector, rotate, vector_angle, vector_projection_on_subspace
 import copy
 import textwrap
 import numpy as np
 import xmlrpc.client as xmlrpclib
+from io import StringIO
+import warnings
+
+# from shapedesign
+from shapedesign.src.utilities.pose import get_position_info, dof_map
+from pyrosetta.rosetta.std import istringstream
+from pyrosetta.rosetta.core.conformation.symmetry import SymmData
+from pyrosetta.rosetta.protocols.symmetry import SetupForSymmetryMover
+from pyrosetta.rosetta.core.pose.datacache import CacheableDataType
+from shapedesign.src.utilities.pose import get_position_info, dof_map
+from shapedesign.src.utilities.kinematics import set_jumpdof
+from pyrosetta import Pose
+from pyrosetta.rosetta.core.pose.symmetry import extract_asymmetric_unit
+from pyrosetta.rosetta.core.conformation.symmetry import residue_center_of_mass
 
 class UndefinedParameters(BaseException):
     """An exception that reports that the user has undefined parameters. Used in the CoordinateFrame class."""
@@ -38,6 +51,13 @@ class CoordinateFrame:
             self._vrt_orig = np.ndarray(orig)
         else:
             self._vrt_orig = orig
+
+    def rotate(self, R):
+        """Rotates the coordinate frame with the rotation matrix R"""
+        self._vrt_orig = rotate(self._vrt_orig, R)
+        self._vrt_x = rotate(self._vrt_x, R)
+        self._vrt_y = rotate(self._vrt_y, R)
+        self._vrt_z = rotate(self._vrt_z, R)
 
     @property
     def vrt_x(self):
@@ -79,7 +99,7 @@ class CoordinateFrame:
     def vrt_orig(self, vrt_orig):
         self._vrt_orig = vrt_orig
 
-    def rosetta_repr(self):
+    def __str__(self):
         str_rosetta_style = "xyz " + self.name
         for vrt in (self._vrt_x, self._vrt_y, self._vrt_orig):
             if vrt is None:  # do not print anything if these are not defined
@@ -142,11 +162,32 @@ class SymmetrySetup:
         # self._dofs = dofs
         # self._vrts = vrts
 
+    def reset_all_dofs(self):
+        """Resets all the values of the dofs."""
+        for jn, vl in self._dofs.items():
+            for v in vl:
+                v[2] = 0.0
+
+    def set_dof(self, jumpname, dof, doftype, value):
+        """Sets the value of the dof.
+
+        :param jumpname: Jumpname
+        :param dof: dof (x,y,z)
+        :param doftype: (translation, rotation)
+        :param value: value to set for the dof
+        :return:
+        """
+        for jn, vl in self._dofs.items():
+            if jn == jumpname:
+                for n, v in enumerate(vl):
+                    t_dof, t_doftype, _ = v
+                    if t_dof == dof and t_doftype == doftype:
+                        self._dofs[jn][n][2] = value
+
     def add_vrt(self, vrt):
         """Adds a CoordinateFrame to this instance.
 
         :param CoordinateFrame vrt: name of the CoordinateFrame.
-
         """
         self._vrts.append(vrt)
 
@@ -303,41 +344,58 @@ class SymmetrySetup:
                 return False
         return True
 
+    def make_symmetry_definition(self, use_stored_anchor=False, anchor_moved_resnums=0):
+        """Writes the symmetry definition to a python string."""
+        symdef = ""
+        symdef += "symmetry_name " + self.symmetry_name + "\n"
+        symdef += "E = " + self.energies + "\n"
+        symdef += "anchor_residue " + (str(self.actual_anchor_residue + anchor_moved_resnums) if use_stored_anchor else self.anchor) + "\n"
+        if self.recenter:
+            symdef += "recenter" + "\n"
+        symdef += "virtual_coordinates_start" + "\n"
+        for vrt in self._vrts:
+            symdef += str(vrt) + "\n"
+        symdef += "virtual_coordinates_stop" + "\n"
+        for name, connection in self._jumps.items():
+            symdef += "connect_virtual " + name + " " + connection[0] + " " + connection[1] + "\n"
+        for jump, dofs in self._dofs.items():
+            symdef += "set_dof " + jump
+            for dof in dofs:
+                if dof[1] == "translation":
+                    symdef += " " + dof[0]
+                else:
+                    symdef += " angle_" + dof[0]
+                if dof[2] is not None:
+                    symdef += "(" + str(dof[2]) + ")"
+            symdef += "\n"
+        for i, (name, jumps) in enumerate(self._jumpgroups.items(), 1):
+            symdef += "set_jump_group " + name
+            for jump in jumps:
+                symdef += " " + jump
+            if not i == len(self._jumpgroups):
+                symdef += "\n"
+        return symdef
+
     def output(self, name):
         """Prints the symmetry file to disk.
 
         :param str name: name given to file.
-
         """
-        file = open(name, 'w')
-        file.write("symmetry_name " + self.symmetry_name + "\n")
-        file.write("E = " + self.energies + "\n")
-        file.write("anchor_residue " + self.anchor + "\n")
-        if self.recenter:
-            file.write("recenter" + "\n")
-        file.write("virtual_coordinates_start" + "\n")
-        for vrt in self._vrts:
-            file.write(vrt.rosetta_repr() + "\n")
-        file.write("virtual_coordinates_stop" + "\n")
-        for name, connection in self._jumps.items():
-            file.write("connect_virtual " + name + " " + connection[0] + " " + connection[1] + "\n")
-        for jump, dofs in self._dofs.items():
-            file.write("set_dof " + jump)
-            for dof in dofs:
-                if dof[1] == "translation":
-                    file.write(" " + dof[0])
-                else:
-                    file.write(" angle_" + dof[0])
-                if dof[2] is not None:
-                    file.write("(" + str(dof[2]) + ")")
-            file.write("\n")
-        for i, (name, jumps) in enumerate(self._jumpgroups.items(), 1):
-            file.write("set_jump_group " + name)
-            for jump in jumps:
-                file.write(" " + jump)
-            if not i == len(self._jumpgroups):
-                file.write("\n")
-        file.close()
+        with open(name, 'w') as f:
+            f.write(self.make_symmetry_definition())
+
+    def read_from_pose(self, pose, save_anchor_residue=False):
+        """Reads a symmetry file from pose.
+
+        :param pose: pose to read from. Must contain SYMMETRY in the datacache.
+        :param save_anchor_residue: saves the actual anchor residue. Useful if the pose has changed after reading the symmetry for
+        the first time, for example if actions needs to be taken on the asymmetric pose and the pose needs to be symmetrized again.
+        :return: None
+        """
+        syminfo = pose.data().get_ptr(CacheableDataType.STRING_MAP).map()["SYMMETRY"].split(" | ")
+        self.extract_symmetry_info(syminfo)
+        if save_anchor_residue:
+            self.actual_anchor_residue = residue_center_of_mass(pose.conformation(), 1, pose.chain_end(1))
 
     def read_from_file(self, name):
         """Reads a symmetry file from disk.
@@ -345,8 +403,28 @@ class SymmetrySetup:
         :param name: name of file to read from.
         :return: None
         """
-        file = open(name, 'r')
-        for line in file:
+        if type(name) == str:
+            file = open(name, 'r')
+        else: # if io.StringIO
+            file = name
+        self.extract_symmetry_info(file)
+
+    def get_asymmetric_pose(self, pose, reset_dofs=True, dont_reset:list=None):
+        if reset_dofs:
+            pose = pose.clone() # will shadow the pose and pose will not change
+            # set all degrees of freedom to 0
+            for jump, dofs in get_position_info(pose, dictionary=True).items():
+                if dont_reset and jump in dont_reset:
+                    continue
+                for dof, old_val in dofs.items():
+                    set_jumpdof(pose, jump, dof_map[dof], 0)
+        # create a new pose object and fill it with the asymmetric pose
+        apose = Pose()
+        extract_asymmetric_unit(pose, apose, False)
+        return apose
+
+    def extract_symmetry_info(self, info):
+        for line in info:
             line = line.split()
             if line[0] == "symmetry_name":
                 self.symmetry_name = " ".join(line[1:])
@@ -360,8 +438,8 @@ class SymmetrySetup:
                 vrt_name = line[1]
                 x = np.array(line[2].split(","), dtype=np.float)
                 y = np.array(line[3].split(","), dtype=np.float)
-                z = np.cross(x,y)
-                self.add_vrt((CoordinateFrame(vrt_name, x, y, z, np.array(line[4].split(","),dtype=np.float ))))
+                z = np.cross(x, y)
+                self.add_vrt((CoordinateFrame(vrt_name, x, y, z, np.array(line[4].split(","), dtype=np.float))))
             elif line[0] == "connect_virtual":
                 self.add_jump(line[1], line[2], line[3])
             elif line[0] == "set_dof":
@@ -387,6 +465,377 @@ class SymmetrySetup:
         """
         cmd = xmlrpclib.ServerProxy(f'http://{ip}:{port}')
         cmd.do(self.__make_visualization_str(apply_dofs, mark_jumps))
+
+    def update_from_pose(self, pose):
+        """Updates the dofs from current dofs in the pose."""
+        # Get the set_dof lines in the symmetry file and see how the names have changed. Then modify the names
+        position_info = get_position_info(pose, dictionary=True)
+        # update the dofs
+        for jumpname, dofinfo in position_info.items():
+            dofs = self._dofs[jumpname]
+            # fixme: change how this is accessed - this is a bit cluncky
+            #  the self._dofs should have been a dict of dict
+            new_dofs = []
+            for dofname, dofval in dofinfo.items():
+                 # condition means that the dofname contains 'angle' and is therefore a 'rotation'
+                t = f"{'rotation' if len(dofname) > 1 else 'translation'}"
+                d = f"{dofname.split('_')[1] if len(dofname) > 1 else dofname}"
+                for dof in dofs:
+                    if d == dof[0] and t == dof[1]:
+                        new_dofs.append([*dof[:-1], dofval])
+            self._dofs[jumpname] = new_dofs
+
+    def get_coordinateframes(self, apply_dofs=True):
+        """Returns a list of the coordinates frames with or without applied dofs.
+
+        :param apply_dofs: Applies the translational and rotational degrees of freedom specified in
+                           the symmetry definition file.
+        :return:
+        """
+        if apply_dofs and len(self._dofs) != 0:
+            symmetry_setup = copy.deepcopy(self)
+            self.__apply_dofs(symmetry_setup)
+        else:
+            symmetry_setup = self
+        return symmetry_setup._vrts
+
+    def make_symmetric_pose(self, pose, use_stored_anchor=False, anchor_moved_resnums=0):
+        """Symmetrizes the pose with the symmetrysetup (internal symmetry definition)."""
+        s = SymmData()
+        symdef = self.make_symmetry_definition(use_stored_anchor, anchor_moved_resnums)
+        s.read_symmetry_data_from_stream(istringstream(symdef))
+        setup = SetupForSymmetryMover(s)
+        setup.apply(pose)
+
+    def rotations_to_2folds(self, pose, visualize=False, cmd=None):
+        """Gets the rotation angles from the master subunit com to the two 2-fold symmetry axes.
+
+        When looking at the icosahedral structure in PyMOL the neative angle_z rotation is to the left and the positive
+        to the right.
+        """
+        symmetry_setup = copy.deepcopy(self)
+        symmetry_setup.update_from_pose(pose)
+        self.__apply_dofs(symmetry_setup)
+
+        # main 5-fold vectors
+        v_5fold_center_to_5fold_master_com = symmetry_setup.get_vrt_name("VRT5fold1111").vrt_orig - symmetry_setup.get_vrt_name("VRT5fold1").vrt_orig
+        # v_5fold_center_to_5fold_slave2_com = symmetry_setup.get_vrt_name("VRT5fold1211").vrt_orig - symmetry_setup.get_vrt_name("VRT5fold1").vrt_orig
+        # v_5fold_center_to_5fold_slave5_com = symmetry_setup.get_vrt_name("VRT5fold1511").vrt_orig - symmetry_setup.get_vrt_name("VRT5fold1").vrt_orig
+
+        # other 5-fold vectors
+        v_5fold_center_to_2fold_center = symmetry_setup.get_vrt_name("VRT2fold1").vrt_orig - symmetry_setup.get_vrt_name("VRT5fold1").vrt_orig
+        # v_2fold_center_to_3fold_center = symmetry_setup.get_vrt_name("VRT3fold1").vrt_orig - symmetry_setup.get_vrt_name("VRT2fold1").vrt_orig
+        v_5fold_center_to_3fold_center = symmetry_setup.get_vrt_name("VRT3fold1").vrt_orig - symmetry_setup.get_vrt_name("VRT5fold1").vrt_orig
+
+        # project these onto subspace
+        # NOTE: vector_projection_on_subspace assumes orthonormal vectors in subspace!!!
+        #  Since the capsid is oriented in the z direction then x-y spane a plane slicing through it. We can use that.
+        v_5fold_center_to_2fold_center_projected = vector_projection_on_subspace(v_5fold_center_to_2fold_center,
+                                                                                 np.array([1, 0, 0]),
+                                                                                 np.array([0, 1, 0]))
+        v_5fold_center_to_3fold_center_projected = vector_projection_on_subspace(v_5fold_center_to_3fold_center,
+                                                                                  np.array([1, 0, 0]),
+                                                                                  np.array([0, 1, 0]))
+
+        angle_to_nearest_2fold = vector_angle(v_5fold_center_to_5fold_master_com, v_5fold_center_to_2fold_center_projected)
+        angle_to_furthest_2fold = vector_angle(v_5fold_center_to_5fold_master_com, v_5fold_center_to_3fold_center_projected)
+
+        if visualize:
+            cmd.do(f"pseudoatom v_5fold_center_to_5fold_master_com, pos={list(v_5fold_center_to_5fold_master_com)}")
+            # cmd.do(f"v_5fold_center_to_5fold_master_com {symmetry_setup.get_vrt_name('VRT5fold1').vrt_orig}, {symmetry_setup.get_vrt_name("VRT5fold1111").vrt_orig})
+            # cmd.do(f"pseudoatom v_5fold_center_to_5fold_slave2_com, pos={list(v_5fold_center_to_5fold_slave2_com)}")
+            # cmd.do(f"pseudoatom v_5fold_center_to_5fold_slave5_com, pos={list(v_5fold_center_to_5fold_slave5_com)}")
+            cmd.do(f"pseudoatom v_5fold_center_to_2fold_center, pos={list(v_5fold_center_to_2fold_center)}")
+            cmd.do(f"pseudoatom v_5fold_center_to_3fold_center, pos={list(v_5fold_center_to_3fold_center)}")
+            cmd.do(f"pseudoatom v_5fold_center_to_2fold_center_projected, pos={list(v_5fold_center_to_2fold_center_projected)}")
+            cmd.do(f"pseudoatom v_5fold_center_to_3fold_center_projected, pos={list(v_5fold_center_to_3fold_center_projected)}")
+
+
+        # todo: record this before hand
+        # Now, the two 2 2-folds can be either right or left ot the master subunuit. To determine if they are right of left we can take the
+        # cross product of one of them and sew how it aligns with the global z-axis. If it is -z (global axis), the 2-fold is to the left,
+        # or the negative direction, while it is vica versa for the other. We arbitrarily pick the two-fold that is closest. This is
+        # the one connected by VRT2fold1 to calculate the cross product from.
+        z_value = np.cross(v_5fold_center_to_5fold_master_com, v_5fold_center_to_2fold_center_projected)[2]
+        if z_value < 0: # the nearest twofold is to the left / in the negative angle_z rotation direction. [1stm case]
+            max_negative_angle = -angle_to_nearest_2fold / 2
+            max_positive_angle = angle_to_furthest_2fold / 2
+        else: # the nearest twofold is to the right / in the positive angle_z rotation direction. [4v4m case]
+            max_negative_angle = -angle_to_furthest_2fold / 2
+            max_positive_angle = angle_to_nearest_2fold / 2
+
+        total_angle = angle_to_nearest_2fold + angle_to_furthest_2fold
+        if not np.isclose(total_angle, 72, rtol=1e-02):
+            warnings.warn(f"The total 5-fold angle is not 72 degrees but {total_angle} degrees. Inaccuracies can arise "
+                          f"if the crystal structure is not perfectly symmetrical (and hence the symmdef file might "
+                          f"not be as well).")
+
+        return max_negative_angle, max_positive_angle
+
+    def create_independent_icosahedral_symmetries(self, pose):
+        """Creates independent symmetries for the icosahedral 5-fold, 3-fold and two 2-folds."""
+        symmetry_setup = copy.deepcopy(self)
+        self.__apply_dofs(symmetry_setup)
+        symmetry_setup.update_from_pose(pose)
+
+        fold5 = SymmetrySetup()
+        fold5.read_from_file(
+        StringIO(textwrap.dedent(f"""symmetry_name 5fold
+        E = 60*VRT5fold1111 + 60*(VRT5fold1111:VRT5fold1211) + 60*(VRT5fold1111:VRT5fold1311)
+        anchor_residue COM
+        virtual_coordinates_start
+        {self.get_vrt_name("VRTglobal")}
+        {self.get_vrt_name("VRT5fold")}
+        {self.get_vrt_name("VRT5fold1")}
+        {self.get_vrt_name("VRT5fold11")}
+        {self.get_vrt_name("VRT5fold111")}
+        {self.get_vrt_name("VRT5fold1111")}
+        {self.get_vrt_name("VRT5fold12")}
+        {self.get_vrt_name("VRT5fold121")}
+        {self.get_vrt_name("VRT5fold1211")}
+        {self.get_vrt_name("VRT5fold13")}
+        {self.get_vrt_name("VRT5fold131")}
+        {self.get_vrt_name("VRT5fold1311")}
+        {self.get_vrt_name("VRT5fold14")}
+        {self.get_vrt_name("VRT5fold141")}
+        {self.get_vrt_name("VRT5fold1411")}
+        {self.get_vrt_name("VRT5fold15")}
+        {self.get_vrt_name("VRT5fold151")}
+        {self.get_vrt_name("VRT5fold1511")}
+        virtual_coordinates_stop  
+        connect_virtual JUMP5fold VRTglobal VRT5fold
+        connect_virtual JUMP5fold1 VRT5fold VRT5fold1
+        connect_virtual JUMP5fold11 VRT5fold1 VRT5fold11
+        connect_virtual JUMP5fold111 VRT5fold11 VRT5fold111
+        connect_virtual JUMP5fold1111 VRT5fold111 VRT5fold1111
+        connect_virtual JUMP5fold1111_subunit VRT5fold1111 SUBUNIT
+        connect_virtual JUMP5fold12 VRT5fold1 VRT5fold12
+        connect_virtual JUMP5fold121 VRT5fold12 VRT5fold121
+        connect_virtual JUMP5fold1211 VRT5fold121 VRT5fold1211
+        connect_virtual JUMP5fold1211_subunit VRT5fold1211 SUBUNIT
+        connect_virtual JUMP5fold13 VRT5fold1 VRT5fold13
+        connect_virtual JUMP5fold131 VRT5fold13 VRT5fold131
+        connect_virtual JUMP5fold1311 VRT5fold131 VRT5fold1311
+        connect_virtual JUMP5fold1311_subunit VRT5fold1311 SUBUNIT
+        connect_virtual JUMP5fold14 VRT5fold1 VRT5fold14
+        connect_virtual JUMP5fold141 VRT5fold14 VRT5fold141
+        connect_virtual JUMP5fold1411 VRT5fold141 VRT5fold1411
+        connect_virtual JUMP5fold1411_subunit VRT5fold1411 SUBUNIT
+        connect_virtual JUMP5fold15 VRT5fold1 VRT5fold15
+        connect_virtual JUMP5fold151 VRT5fold15 VRT5fold151
+        connect_virtual JUMP5fold1511 VRT5fold151 VRT5fold1511
+        connect_virtual JUMP5fold1511_subunit VRT5fold1511 SUBUNIT
+        set_dof JUMP5fold1 z({symmetry_setup._dofs['JUMP5fold1'][0][2]}) angle_z({symmetry_setup._dofs['JUMP5fold1'][1][2]})
+        set_dof JUMP5fold111 x({symmetry_setup._dofs['JUMP5fold111'][0][2]})
+        set_dof JUMP5fold1111 angle_x({symmetry_setup._dofs['JUMP5fold1111'][0][2]}) angle_y({symmetry_setup._dofs['JUMP5fold1111'][1][2]}) angle_z({symmetry_setup._dofs['JUMP5fold1111'][2][2]})
+        set_dof JUMP5fold1111_subunit angle_x({symmetry_setup._dofs['JUMP5fold1111_subunit'][0][2]}) angle_y({symmetry_setup._dofs['JUMP5fold1111_subunit'][1][2]}) angle_z({symmetry_setup._dofs['JUMP5fold1111_subunit'][2][2]})
+        set_jump_group JUMPGROUP1 JUMP5fold1 
+        set_jump_group JUMPGROUP2 JUMP5fold111 JUMP5fold121 JUMP5fold131 JUMP5fold141 JUMP5fold151 
+        set_jump_group JUMPGROUP3 JUMP5fold1111 JUMP5fold1211 JUMP5fold1311 JUMP5fold1411 JUMP5fold1511 
+        set_jump_group JUMPGROUP4 JUMP5fold1111_subunit JUMP5fold1211_subunit JUMP5fold1311_subunit JUMP5fold1411_subunit JUMP5fold1511_subunit 
+        """)))
+
+        # TODO: change the symmetry so that depending on if it is 4v4m or 1stm different symmetries have to be used
+
+        fold3 = SymmetrySetup()
+        fold3.read_from_file(
+        StringIO(textwrap.dedent(f"""symmetry_name 3fold
+        E = 60*VRT5fold1111 + 60*(VRT5fold1111:VRT3fold1111)
+        anchor_residue COM
+        virtual_coordinates_start
+        {self.get_vrt_name("VRTglobal")}
+        {self.get_vrt_name("VRT5fold")}
+        {self.get_vrt_name("VRT5fold1")}
+        {self.get_vrt_name("VRT5fold11")}
+        {self.get_vrt_name("VRT5fold111")}
+        {self.get_vrt_name("VRT5fold1111")}
+        {self.get_vrt_name("VRT3fold")}
+        {self.get_vrt_name("VRT3fold1")}
+        {self.get_vrt_name("VRT3fold11")}
+        {self.get_vrt_name("VRT3fold111")}
+        {self.get_vrt_name("VRT3fold1111")}
+        {self.get_vrt_name("VRT2fold")}
+        {self.get_vrt_name("VRT2fold1")}
+        {self.get_vrt_name("VRT2fold12")}
+        {self.get_vrt_name("VRT2fold121")}
+        {self.get_vrt_name("VRT2fold1211")}
+        virtual_coordinates_stop
+        connect_virtual JUMP5fold VRTglobal VRT5fold
+        connect_virtual JUMP5fold1 VRT5fold VRT5fold1
+        connect_virtual JUMP5fold11 VRT5fold1 VRT5fold11
+        connect_virtual JUMP5fold111 VRT5fold11 VRT5fold111
+        connect_virtual JUMP5fold1111 VRT5fold111 VRT5fold1111
+        connect_virtual JUMP5fold1111_subunit VRT5fold1111 SUBUNIT
+        connect_virtual JUMP3fold VRTglobal VRT3fold
+        connect_virtual JUMP3fold1 VRT3fold VRT3fold1
+        connect_virtual JUMP3fold11 VRT3fold1 VRT3fold11
+        connect_virtual JUMP3fold111 VRT3fold11 VRT3fold111
+        connect_virtual JUMP3fold1111 VRT3fold111 VRT3fold1111
+        connect_virtual JUMP3fold1111_subunit VRT3fold1111 SUBUNIT
+        connect_virtual JUMP2fold VRTglobal VRT2fold
+        connect_virtual JUMP2fold1 VRT2fold VRT2fold1
+        connect_virtual JUMP2fold12 VRT2fold1 VRT2fold12
+        connect_virtual JUMP2fold121 VRT2fold12 VRT2fold121
+        connect_virtual JUMP2fold1211 VRT2fold121 VRT2fold1211
+        connect_virtual JUMP2fold1211_subunit VRT2fold1211 SUBUNIT
+        set_dof JUMP5fold1 z({symmetry_setup._dofs['JUMP5fold1'][0][2]}) angle_z({symmetry_setup._dofs['JUMP5fold1'][1][2]})
+        set_dof JUMP5fold111 x({symmetry_setup._dofs['JUMP5fold111'][0][2]})
+        set_dof JUMP5fold1111 angle_x({symmetry_setup._dofs['JUMP5fold1111'][0][2]}) angle_y({symmetry_setup._dofs['JUMP5fold1111'][1][2]}) angle_z({symmetry_setup._dofs['JUMP5fold1111'][2][2]})
+        set_dof JUMP5fold1111_subunit angle_x({symmetry_setup._dofs['JUMP5fold1111_subunit'][0][2]}) angle_y({symmetry_setup._dofs['JUMP5fold1111_subunit'][1][2]}) angle_z({symmetry_setup._dofs['JUMP5fold1111_subunit'][2][2]})
+        set_jump_group JUMPGROUP1 JUMP5fold1 JUMP3fold1 JUMP2fold1
+        set_jump_group JUMPGROUP2 JUMP5fold111 JUMP3fold111  JUMP2fold121
+        set_jump_group JUMPGROUP3 JUMP5fold1111 JUMP3fold1111  JUMP2fold1211
+        set_jump_group JUMPGROUP4 JUMP5fold1111_subunit JUMP3fold1111_subunit JUMP2fold1211_subunit
+        """)))
+
+        fold2_1 = SymmetrySetup()
+        fold2_1.read_from_file(
+        StringIO(textwrap.dedent(f"""symmetry_name 2fold_1
+        E = 60*VRT5fold1111 + 30*(VRT5fold1111:VRT2fold1111)
+        anchor_residue COM
+        virtual_coordinates_start
+        {self.get_vrt_name("VRTglobal")}
+        {self.get_vrt_name("VRT5fold")}
+        {self.get_vrt_name("VRT5fold1")}
+        {self.get_vrt_name("VRT5fold11")}
+        {self.get_vrt_name("VRT5fold111")}
+        {self.get_vrt_name("VRT5fold1111")}
+        {self.get_vrt_name("VRT2fold")}
+        {self.get_vrt_name("VRT2fold1")}
+        {self.get_vrt_name("VRT2fold11")}
+        {self.get_vrt_name("VRT2fold111")}
+        {self.get_vrt_name("VRT2fold1111")}
+        virtual_coordinates_stop
+        connect_virtual JUMP5fold VRTglobal VRT5fold
+        connect_virtual JUMP5fold1 VRT5fold VRT5fold1
+        connect_virtual JUMP5fold11 VRT5fold1 VRT5fold11
+        connect_virtual JUMP5fold111 VRT5fold11 VRT5fold111
+        connect_virtual JUMP5fold1111 VRT5fold111 VRT5fold1111
+        connect_virtual JUMP5fold1111_subunit VRT5fold1111 SUBUNIT
+        connect_virtual JUMP2fold VRTglobal VRT2fold
+        connect_virtual JUMP2fold1 VRT2fold VRT2fold1
+        connect_virtual JUMP2fold11 VRT2fold1 VRT2fold11
+        connect_virtual JUMP2fold111 VRT2fold11 VRT2fold111
+        connect_virtual JUMP2fold1111 VRT2fold111 VRT2fold1111
+        connect_virtual JUMP2fold1111_subunit VRT2fold1111 SUBUNIT
+        set_dof JUMP5fold1 z({symmetry_setup._dofs['JUMP5fold1'][0][2]}) angle_z({symmetry_setup._dofs['JUMP5fold1'][1][2]})
+        set_dof JUMP5fold111 x({symmetry_setup._dofs['JUMP5fold111'][0][2]})
+        set_dof JUMP5fold1111 angle_x({symmetry_setup._dofs['JUMP5fold1111'][0][2]}) angle_y({symmetry_setup._dofs['JUMP5fold1111'][1][2]}) angle_z({symmetry_setup._dofs['JUMP5fold1111'][2][2]})
+        set_dof JUMP5fold1111_subunit angle_x({symmetry_setup._dofs['JUMP5fold1111_subunit'][0][2]}) angle_y({symmetry_setup._dofs['JUMP5fold1111_subunit'][1][2]}) angle_z({symmetry_setup._dofs['JUMP5fold1111_subunit'][2][2]})
+        set_jump_group JUMPGROUP1 JUMP5fold1 JUMP2fold1
+        set_jump_group JUMPGROUP2 JUMP5fold111 JUMP2fold111 
+        set_jump_group JUMPGROUP3 JUMP5fold1111 JUMP2fold1111 
+        set_jump_group JUMPGROUP4 JUMP5fold1111_subunit JUMP2fold1111_subunit 
+        """)))
+
+        fold2_2 = SymmetrySetup()
+        fold2_2.read_from_file(
+        StringIO(textwrap.dedent(f"""symmetry_name fold2_2 
+        E = 60*VRT5fold1111 + 30*(VRT5fold1111:VRT3fold1211)
+        anchor_residue COM
+        virtual_coordinates_start
+        {self.get_vrt_name("VRTglobal")}
+        {self.get_vrt_name("VRT5fold")}
+        {self.get_vrt_name("VRT5fold1")}
+        {self.get_vrt_name("VRT5fold11")}
+        {self.get_vrt_name("VRT5fold111")}
+        {self.get_vrt_name("VRT5fold1111")}
+        {self.get_vrt_name("VRT3fold")}
+        {self.get_vrt_name("VRT3fold1")}
+        {self.get_vrt_name("VRT3fold12")}
+        {self.get_vrt_name("VRT3fold121")}
+        {self.get_vrt_name("VRT3fold1211")}
+        virtual_coordinates_stop
+        connect_virtual JUMP5fold VRTglobal VRT5fold
+        connect_virtual JUMP5fold1 VRT5fold VRT5fold1
+        connect_virtual JUMP5fold11 VRT5fold1 VRT5fold11
+        connect_virtual JUMP5fold111 VRT5fold11 VRT5fold111
+        connect_virtual JUMP5fold1111 VRT5fold111 VRT5fold1111
+        connect_virtual JUMP5fold1111_subunit VRT5fold1111 SUBUNIT
+        connect_virtual JUMP3fold VRTglobal VRT3fold
+        connect_virtual JUMP3fold1 VRT3fold VRT3fold1
+        connect_virtual JUMP3fold12 VRT3fold1 VRT3fold12
+        connect_virtual JUMP3fold121 VRT3fold12 VRT3fold121
+        connect_virtual JUMP3fold1211 VRT3fold121 VRT3fold1211
+        connect_virtual JUMP3fold1211_subunit VRT3fold1211 SUBUNIT
+        set_dof JUMP5fold1 z({symmetry_setup._dofs['JUMP5fold1'][0][2]}) angle_z({symmetry_setup._dofs['JUMP5fold1'][1][2]})
+        set_dof JUMP5fold111 x({symmetry_setup._dofs['JUMP5fold111'][0][2]})
+        set_dof JUMP5fold1111 angle_x({symmetry_setup._dofs['JUMP5fold1111'][0][2]}) angle_y({symmetry_setup._dofs['JUMP5fold1111'][1][2]}) angle_z({symmetry_setup._dofs['JUMP5fold1111'][2][2]})
+        set_dof JUMP5fold1111_subunit angle_x({symmetry_setup._dofs['JUMP5fold1111_subunit'][0][2]}) angle_y({symmetry_setup._dofs['JUMP5fold1111_subunit'][1][2]}) angle_z({symmetry_setup._dofs['JUMP5fold1111_subunit'][2][2]})
+        set_jump_group JUMPGROUP1 JUMP5fold1 JUMP3fold1
+        set_jump_group JUMPGROUP2 JUMP5fold111 JUMP3fold121
+        set_jump_group JUMPGROUP3 JUMP5fold1111 JUMP3fold1211
+        set_jump_group JUMPGROUP4 JUMP5fold1111_subunit JUMP3fold1211_subunit
+        """)))
+
+        # setup_3fold = SymmetrySetup("3fold")
+        # vrtglobal = symmetry_setup.get_vrt_name("VRTglobal")
+        # center_of_3fold = np.array([symmetry_setup.get_vrt_name(vrt).vrt_orig for vrt in ("VRT5fold1111", "VRT3fold1111", "VRT2fold1111")]).sum(axis=1) / 3
+        # rotation_to_3fold = rotation_matrix_from_vector_to_vector(vrtglobal.vrt_orig, center_of_3fold)
+        # vrt3fold = copy.deepcopy(vrtglobal).rotate(rotation_to_3fold)
+
+        return fold5, fold3, fold2_1, fold2_2
+
+    def get_icosahedral_boundary_box(self):
+        pass # get how much you can rotate/translate
+
+    def __apply_dofs(self, symmetry_setup):
+        """Applies the translational and rotational degrees of freedom specified in the symmetry definition file."""
+        # checks that the degrees of freedom set are from the master jumps
+        if not symmetry_setup.is_dof_master_jumps():
+            raise ValueError(textwrap.dedent("""
+                                    The degrees of freedom set are not of the master jumps.
+                                    The results will not make sense if not.
+                                    """))
+        for jump_to_apply_dof_to, dofs in symmetry_setup._dofs.items():
+            # find the jumpgroup the master jump degree of freedom belongs too
+            for jumpgroup in symmetry_setup._jumpgroups.values():
+                # check that the dof jump and the first entry (aka master jump) in the jumpgroup is the same
+                # they could be out of order and therefore the first defined jump in set_dof might not be the
+                # same in set_jump_group. Keep iterating until it is the same.
+                # might need to check that none of them matches and output an error
+                if jump_to_apply_dof_to == jumpgroup[0]:
+                    break
+
+            # apply dofs to all jumps in the jumpgroup
+            for jump in jumpgroup:
+                # find all downstream vrt names connected to the jump
+                vrts_to_apply_dof_to = symmetry_setup.get_downstream_connections(jump)
+                #  Find the reference vrt that the dofs should be applied from
+                vrt_reference_name = symmetry_setup._jumps[jump][0]
+                vrt_reference = symmetry_setup.get_vrt_name(vrt_reference_name)
+
+                # now apply the dofs vrts_to_apply_dof_to
+                for vrt_to_name in vrts_to_apply_dof_to:
+                    if vrt_to_name == "SUBUNIT":
+                        continue
+                    vrt_to = symmetry_setup.get_vrt_name(vrt_to_name)
+                    for dof in dofs:
+                        if dof[2] is not None:
+                            value = dof[2]
+                        else:
+                            continue
+                        if dof[1] == "translation":
+                            axis = dof[0]
+                            if axis == 'x':
+                                axis_to_apply_from = - vrt_reference.vrt_x  # minus because of Rosettas convention
+                            elif axis == 'y':
+                                axis_to_apply_from = vrt_reference.vrt_y
+                            elif axis == 'z':
+                                axis_to_apply_from = - vrt_reference.vrt_z  # minus because of Rosettas convention
+                            vrt_to.vrt_orig = vrt_to.vrt_orig + axis_to_apply_from * value
+                        elif dof[1] == "rotation":
+                            axis = dof[0]
+                            if axis == 'x':
+                                axis_to_apply_from = - vrt_reference.vrt_x  # minus because of Rosettas convention (i think it applies to rot)
+                            elif axis == 'y':
+                                axis_to_apply_from = vrt_reference.vrt_y
+                            elif axis == 'z':
+                                axis_to_apply_from = vrt_reference.vrt_z  # minus because of Rosettas convention(i think it applies to rot)
+                            R = rotation_matrix(axis_to_apply_from, value)
+                            vrt_to.vrt_x = rotate(vrt_to.vrt_x, R)
+                            vrt_to.vrt_y = rotate(vrt_to.vrt_y, R)
+                            vrt_to.vrt_z = rotate(vrt_to.vrt_z, R)
 
     def __make_visualization_str(self, apply_dofs=True, mark_jumps=True):
         """Makes python script as a str that can either be printed to a file or use in PyMOL directly.
@@ -435,60 +884,7 @@ class SymmetrySetup:
             symmetry_setup = copy.deepcopy(
                 self)  # is this important? yes beacuse we are applying dofs now to the symmetry_setup
             # checks that the degrees of freedom set are from the master jumps
-            if not symmetry_setup.is_dof_master_jumps():
-                raise ValueError(textwrap.dedent("""
-                                        The degrees of freedom set are not of the master jumps.
-                                        The results will not make sense if not.
-                                        """))
-            for jump_to_apply_dof_to, dofs in symmetry_setup._dofs.items():
-                # find the jumpgroup the master jump degree of freedom belongs too
-                for jumpgroup in symmetry_setup._jumpgroups.values():
-                    # check that the dof jump and the first entry (aka master jump) in the jumpgroup is the same
-                    # they could be out of order and therefore the first defined jump in set_dof might not be the
-                    # same in set_jump_group. Keep iterating until it is the same.
-                    # might need to check that none of them matches and output an error
-                    if jump_to_apply_dof_to == jumpgroup[0]:
-                        break
-
-                # apply dofs to all jumps in the jumpgroup
-                for jump in jumpgroup:
-                    # find all downstream vrt names connected to the jump
-                    vrts_to_apply_dof_to = symmetry_setup.get_downstream_connections(jump)
-                    #  Find the reference vrt that the dofs should be applied from
-                    vrt_reference_name = symmetry_setup._jumps[jump][0]
-                    vrt_reference = symmetry_setup.get_vrt_name(vrt_reference_name)
-
-                    # now apply the dofs vrts_to_apply_dof_to
-                    for vrt_to_name in vrts_to_apply_dof_to:
-                        if vrt_to_name == "SUBUNIT":
-                            continue
-                        vrt_to = symmetry_setup.get_vrt_name(vrt_to_name)
-                        for dof in dofs:
-                            if dof[2] is not None:
-                                value = dof[2]
-                            else:
-                                continue
-                            if dof[1] == "translation":
-                                axis = dof[0]
-                                if axis == 'x':
-                                    axis_to_apply_from = - vrt_reference.vrt_x  # minus because of Rosettas convention
-                                elif axis == 'y':
-                                    axis_to_apply_from = vrt_reference.vrt_y
-                                elif axis == 'z':
-                                    axis_to_apply_from = - vrt_reference.vrt_z  # minus because of Rosettas convention
-                                vrt_to.vrt_orig = vrt_to.vrt_orig + axis_to_apply_from * value
-                            elif dof[1] == "rotation":
-                                axis = dof[0]
-                                if axis == 'x':
-                                    axis_to_apply_from = - vrt_reference.vrt_x  # minus because of Rosettas convention (i think it applies to rot)
-                                elif axis == 'y':
-                                    axis_to_apply_from = vrt_reference.vrt_y
-                                elif axis == 'z':
-                                    axis_to_apply_from = - vrt_reference.vrt_z  # minus because of Rosettas convention(i think it applies to rot)
-                                R = rotation_matrix(axis_to_apply_from, value)
-                                vrt_to.vrt_x = rotate(vrt_to.vrt_x, R)
-                                vrt_to.vrt_y = rotate(vrt_to.vrt_y, R)
-                                vrt_to.vrt_z = rotate(vrt_to.vrt_z, R)
+            self.__apply_dofs(symmetry_setup)
         else:
             symmetry_setup = self
 
