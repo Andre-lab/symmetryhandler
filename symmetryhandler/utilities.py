@@ -25,6 +25,7 @@ def symmetrize_pose_from_comment(pose):
     return pose
 
 def get_updated_symmetry_file_from_pose(pose, initial_symmetry_file):
+    pose = pose.clone() # we need this in order to not clear the datacache!
     setup = SymmetrySetup()
     setup.read_from_file(initial_symmetry_file)
     setup.update_from_pose(pose)

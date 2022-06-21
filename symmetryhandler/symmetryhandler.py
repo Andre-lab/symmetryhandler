@@ -29,28 +29,34 @@ class UndefinedParameters(BaseException):
 class CoordinateFrame:
     """A coordinate system containing 4 virtual residues. It is used when modelling symmetry in Rosetta."""
 
-    def __init__(self, name, x=None, y=None, z=None, orig=None):
+    def __init__(self, name, x=None, y=None, z=None, orig=None, generate_z_from_xy=False):
         self.name = name
 
         if type(x) is list:
-            self._vrt_x = np.ndarray(x)
+            self._vrt_x = np.array(x)
         else:
             self._vrt_x = x
 
         if type(y) is list:
-            self._vrt_y = np.ndarray(y)
+            self._vrt_y = np.array(y)
         else:
             self._vrt_y = y
 
-        if type(z) is list:
-            self._vrt_z = np.ndarray(z)
+        if generate_z_from_xy:
+            self.generate_z()
         else:
-            self._vrt_z = z
+            if type(z) is list:
+                self._vrt_z = np.array(z)
+            else:
+                self._vrt_z = z
 
         if type(orig) is list:
-            self._vrt_orig = np.ndarray(orig)
+            self._vrt_orig = np.array(orig)
         else:
             self._vrt_orig = orig
+
+    def generate_z(self):
+        self.vrt_z = np.cross(self.vrt_x, self.vrt_y)
 
     def rotate(self, R):
         """Rotates the coordinate frame with the rotation matrix R"""
@@ -407,6 +413,8 @@ class SymmetrySetup:
             file = open(name, 'r')
         else: # if io.StringIO
             file = name
+        # extract
+        # info = [l.replace("\n", "") for l in file.readlines()]
         self.extract_symmetry_info(file)
 
     def get_asymmetric_pose(self, pose, reset_dofs=True, dont_reset:list=None):
@@ -428,6 +436,10 @@ class SymmetrySetup:
             line = line.split()
             if line[0] == "symmetry_name":
                 self.symmetry_name = " ".join(line[1:])
+            elif line[0] == "virtual_transforms_start":
+                pass
+                # using denovo script!!!
+                # can we transform it into
             elif line[0] == "E":
                 self.energies = " ".join(line[2:])
             elif line[0] == "anchor_residue":
@@ -571,6 +583,80 @@ class SymmetrySetup:
                           f"not be as well).")
 
         return max_negative_angle, max_positive_angle
+
+    # TODO: If needed create a universal n-fold function
+    def create_independent_4fold_symmetries(self, pose):
+        """Creates independent symmetries for the 4-fold."""
+        # chain 1-2 and chain 1-3
+        symmetry_setup = copy.deepcopy(self)
+        self.__apply_dofs(symmetry_setup)
+        symmetry_setup.update_from_pose(pose)
+
+        # what dofs are available in the old file
+
+        chain1_2 = SymmetrySetup()
+        chain1_2.read_from_file(
+            StringIO(textwrap.dedent(f"""symmetry_name chain1_2 
+            E = 4*VRT000111 + 4*(VRT000111:VRT000222)
+            anchor_residue COM 
+            recenter
+            virtual_coordinates_start
+            xyz VRTglobal 1.000000,0.000000,0.000000 0.000000,1.000000,0.000000 0.000000,0.000000,0.000000
+            xyz VRT0001 -1.000000,0.000000,0.000000 0.000000,1.000000,0.000000 0.000000,0.000000,0.000000
+            xyz VRT0002 -0.000000,-1.000000,0.000000 -1.000000,0.000000,0.000000 0.000000,0.000000,0.000000
+            xyz VRT00011 -1.000000,0.000000,0.000000 0.000000,1.000000,0.000000 0.000000,0.000000,0.000000
+            xyz VRT00022 -0.000000,-1.000000,0.000000 -1.000000,0.000000,0.000000 0.000000,0.000000,0.000000
+            xyz VRT000111 -1.000000,0.000000,0.000000 0.000000,1.000000,0.000000 0.000000,0.000000,0.000000
+            xyz VRT000222 -0.000000,-1.000000,0.000000 -1.000000,0.000000,0.000000 0.000000,0.000000,0.000000
+            virtual_coordinates_stop
+            connect_virtual JUMPG1 VRTglobal VRT0001
+            connect_virtual JUMPG2 VRTglobal VRT0002
+            connect_virtual JUMP1 VRT0001 VRT00011
+            connect_virtual JUMP2 VRT0002 VRT00022
+            connect_virtual JUMP11 VRT00011 VRT000111 
+            connect_virtual JUMP22 VRT00022 VRT000222 
+            connect_virtual JUMP111 VRT000111 SUBUNIT
+            connect_virtual JUMP222 VRT000222 SUBUNIT
+            set_dof JUMP1 x({symmetry_setup._dofs['JUMP1'][0][2]}) 
+            set_dof JUMP11 angle_x({symmetry_setup._dofs['JUMP11'][0][2]}) angle_y({symmetry_setup._dofs['JUMP11'][1][2]}) angle_z({symmetry_setup._dofs['JUMP11'][2][2]})
+            set_dof JUMP111 angle_x({symmetry_setup._dofs['JUMP111'][0][2]}) angle_y({symmetry_setup._dofs['JUMP111'][1][2]}) angle_z({symmetry_setup._dofs['JUMP111'][2][2]})
+            set_jump_group MODIFIED_BASEJUMP1 JUMP1 JUMP2
+            set_jump_group MODIFIED_BASEJUMP2 JUMP11 JUMP22
+            set_jump_group MODIFIED_BASEJUMP3 JUMP111 JUMP222
+            """)))
+
+        chain1_3 = SymmetrySetup()
+        chain1_3.read_from_file(
+            StringIO(textwrap.dedent(f"""symmetry_name chain1_3 
+            E = 4*VRT000111 + 2*(VRT000111:VRT000333)
+            anchor_residue COM 
+            recenter
+            virtual_coordinates_start
+            xyz VRTglobal 1.000000,0.000000,0.000000 0.000000,1.000000,0.000000 0.000000,0.000000,0.000000
+            xyz VRT0001 -1.000000,0.000000,0.000000 0.000000,1.000000,0.000000 0.000000,0.000000,0.000000
+            xyz VRT0003 1.000000,-0.000000,0.000000 -0.000000,-1.000000,0.000000 0.000000,0.000000,0.000000
+            xyz VRT00011 -1.000000,0.000000,0.000000 0.000000,1.000000,0.000000 0.000000,0.000000,0.000000
+            xyz VRT00033 1.000000,-0.000000,0.000000 -0.000000,-1.000000,0.000000 0.000000,0.000000,0.000000
+            xyz VRT000111 -1.000000,0.000000,0.000000 0.000000,1.000000,0.000000 0.000000,0.000000,0.000000
+            xyz VRT000333 1.000000,-0.000000,0.000000 -0.000000,-1.000000,0.000000 0.000000,0.000000,0.000000
+            virtual_coordinates_stop
+            connect_virtual JUMPG1 VRTglobal VRT0001
+            connect_virtual JUMPG3 VRTglobal VRT0003
+            connect_virtual JUMP1 VRT0001 VRT00011
+            connect_virtual JUMP3 VRT0003 VRT00033
+            connect_virtual JUMP11 VRT00011 VRT000111 
+            connect_virtual JUMP33 VRT00033 VRT000333 
+            connect_virtual JUMP111 VRT000111 SUBUNIT
+            connect_virtual JUMP333 VRT000333 SUBUNIT
+            set_dof JUMP1 x({symmetry_setup._dofs['JUMP1'][0][2]}) 
+            set_dof JUMP11 angle_x({symmetry_setup._dofs['JUMP11'][0][2]}) angle_y({symmetry_setup._dofs['JUMP11'][1][2]}) angle_z({symmetry_setup._dofs['JUMP11'][2][2]})
+            set_dof JUMP111 angle_x({symmetry_setup._dofs['JUMP111'][0][2]}) angle_y({symmetry_setup._dofs['JUMP111'][1][2]}) angle_z({symmetry_setup._dofs['JUMP111'][2][2]})
+            set_jump_group MODIFIED_BASEJUMP1 JUMP1 JUMP3
+            set_jump_group MODIFIED_BASEJUMP2 JUMP11 JUMP33
+            set_jump_group MODIFIED_BASEJUMP3 JUMP111 JUMP333
+            """)))
+
+        return chain1_2, chain1_3
 
     def create_independent_icosahedral_symmetries(self, pose):
         """Creates independent symmetries for the icosahedral 5-fold, 3-fold and two 2-folds."""
