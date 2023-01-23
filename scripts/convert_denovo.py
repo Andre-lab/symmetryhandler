@@ -7,7 +7,8 @@ Converts a denovo symmetry script to a regular symmetry script
 """
 
 import argparse
-from symmetryhandler.symmetryhandler import SymmetrySetup, CoordinateFrame
+from symmetryhandler.symmetryhandler import SymmetrySetup
+from symmetryhandler.coordinateframe import CoordinateFrame
 from symmetryhandler.mathfunctions import rotation_matrix
 from copy import deepcopy
 from pathlib import Path
@@ -27,17 +28,17 @@ def main(symmetry_file, outname=None):
                     rot_times = int(line[2])
                     rot_degrees = 360 / rot_times
                     if rot_type == "Rz":
-                        axis = ss.get_vrt_name("VRT0001").vrt_z
+                        axis = ss.get_vrt("VRT0001").vrt_z
                     elif rot_type == "Ry":
-                        axis = ss.get_vrt_name("VRT0001").vrt_y
+                        axis = ss.get_vrt("VRT0001").vrt_y
                     elif rot_type == "Rx":
-                        axis = ss.get_vrt_name("VRT0001").vrt_x
+                        axis = ss.get_vrt("VRT0001").vrt_x
                     else:
                         raise NotImplementedError("Only Rz, Ry and Rx has code for it! Sorry")
                     for n, r in enumerate(range(1, rot_times), 2): # we have already done the first (0), and we are naming from 2!
-                        new_vrt = deepcopy(ss.get_vrt_name("VRT0001"))
+                        new_vrt = deepcopy(ss.get_vrt("VRT0001"))
                         new_vrt.name = f"VRT{str(n).rjust(4, '0')}"
-                        new_vrt.rotate(rotation_matrix(axis, rot_degrees * r))
+                        new_vrt.rotate_right_multiply(rotation_matrix(axis, rot_degrees * r))
                         ss.add_vrt(new_vrt)
             if line[0] == "symmetry_name":
                 ss.symmetry_name = " ".join(line[1:])
