@@ -1,6 +1,5 @@
 # SymmetryHandler
-
-If you need to handcraft a symmetry file for Rosetta or visualize said or another symmetry file from Rosetta you've come to the right place. This is a simple utility library that's great at doing both. 
+Simple utility library for working with symmetry and symmetry files in Rosetta.
 
 ## Handcrafting symmetry files. 
 
@@ -15,7 +14,6 @@ It has appropiate getters and setters that easily can be used to set jumps and v
 ## Visualing symmetry
 
 Take a look at the *visualization* functions for the SymmetrySetup class. A script `visualize_symmetry.py` can be used to visualize the symmetry file. Use `visualize_symmetry.py -h` to see more. To run directly in PyMOL run pymol as `pymol -R`.
-
 
 ## Some pictures 
 
