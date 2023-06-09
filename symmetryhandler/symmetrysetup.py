@@ -25,8 +25,9 @@ from symmetryhandler.reference_kinematics import set_jumpdof_str_str, get_dofs
 from scipy.spatial.transform import Rotation as R
 from pathlib import Path
 from io import StringIO
-import yaml
 from pyrosetta.rosetta.std import istringstream
+import tempfile
+import uuid
 
 class SymmetrySetup:
     """A symmetric setup that stores the symmetry information used internally in Rosetta.
@@ -61,16 +62,32 @@ class SymmetrySetup:
         self._jumps = {}
         self._jumpgroups = {}
         self._dofs = {}
-        self._dofrefs = {}
         self._vrts = []
         self._init_vrts = None
         self.reference_symmetric = None
         self.actual_anchor_residue = None
         self.headers = {}
-        if file:
+        if file is not None:
             self.read_from_file(file)
-        elif pose:
-            self.read_from_pose_comment(pose)
+        elif pose is not None:
+            if self.pose_has_symmetry_comment(pose):
+                self.read_from_pose_comment(pose)
+            else:
+                raise ValueError(f"The pose is not symmetric and no SYMMETRY comment is present in the file.")
+
+    def pose_has_symmetry_comment(self, pose):
+        try:
+            _ = pose.data().get_ptr(CacheableDataType.STRING_MAP).map()["SYMMETRY"]
+            return True
+        except:
+            raise AssertionError("Mads you need to find the error called when SYMMETRY IS NOT PRESENT.")
+            return False
+
+    def make_symmetry_file_on_tmp_disk(self) -> str:
+        """Creates the symmetry file on temporary storage (/tmp for linux/macos) and returns a str path to it."""
+        filename = tempfile.gettempdir() + "/" + str(uuid.uuid4())
+        self.output(filename)
+        return filename
 
     def get_map_pose_resi_to_vrt(self, pose):
         return {v: k for k, v in self.get_map_vrt_to_pose_resi(pose).items()}
@@ -88,9 +105,11 @@ class SymmetrySetup:
         return vrt_pose_resi
 
 
+
     def vrts_overlap_with_pose(self, pose, update_and_apply_dofs=True, atol=1e-1):
+        """Asserts the VRTs in the symmetry setup corresponds to the VRTs in the pose."""
         if update_and_apply_dofs:
-            self.update_dofs_from_pose(pose, apply_dofs=True, assert_correct_overlap=False)
+            self.update_dofs_from_pose(pose, apply_dofs=True)
         for vrtname, resi in self.get_map_vrt_to_pose_resi(pose).items():
             residue = pose.residue(resi)
             assert residue.name() == "VRT"
@@ -108,12 +127,12 @@ class SymmetrySetup:
                 assert np.isclose(r_x, v_x, atol=atol).all()
                 assert np.isclose(r_y, v_y, atol=atol).all()
             except AssertionError:
+                print(vrtname, "is wrong")
                 raise AssertionError
         return True
 
-
     @staticmethod
-    def make_asymmetric_pose(pose_in, reset_dofs=True, dont_reset: list = None):
+    def make_asymmetric_pose(pose_in, reset_dofs=True, dont_reset: list = None, check_anchor_is_zero=False):
         """Extact the asymmetric pose with all reset dofs to 0."""
         assert is_symmetric(pose_in), "Pose is not symmetric!"
         pose = pose_in.clone()
@@ -125,12 +144,13 @@ class SymmetrySetup:
                     continue
                 for dof, old_val in dofs.items():
                     set_jumpdof_str_str(pose, jump, dof, 0)
-            # check that the anchor atom is actually at zero!
-            com_ca = np.array(pose.residue(residue_center_of_mass(pose.conformation(), 1, pose.chain_end(1))).atom("CA").xyz())
-            try:
-                assert np.isclose(com_ca, [0, 0, 0], atol=1e-2).all()
-            except:
-                raise ValueError
+            if check_anchor_is_zero:
+                # check that the anchor atom is actually at zero!
+                com_ca = np.array(pose.residue(residue_center_of_mass(pose.conformation(), 1, pose.chain_end(1))).atom("CA").xyz())
+                try:
+                    assert np.isclose(com_ca, [0, 0, 0], atol=1e-2).all()
+                except:
+                    raise AssertionError(f"The anchor residue coordinates is {com_ca}, but should be {[0, 0, 0]}")
         # create a new pose object and fill it with the asymmetric pose
         apose = Pose()
         extract_asymmetric_unit(pose, apose, False)
@@ -147,14 +167,17 @@ class SymmetrySetup:
             raise ValueError("Only dofname = 'x', 'y' or 'z' are understood.")
 
     def get_rot_from_jump(self, jump, dofname):
-        if dofname == "angle_x":
-            return R.from_matrix(jump.get_rotation()).as_euler("xyz", degrees=True)[0]
-        elif dofname == "angle_y":
-            return R.from_matrix(jump.get_rotation()).as_euler("yxz", degrees=True)[0]
-        elif dofname == "angle_z":
-            return R.from_matrix(jump.get_rotation()).as_euler("zyx", degrees=True)[0]
-        else:
-            raise ValueError("Only dofname == 'angle_x', 'angle_y' or 'angle_z' are understood.")
+        try:
+            if dofname == "angle_x":
+                return R.from_matrix(jump.get_rotation()).as_euler("xyz", degrees=True)[0]
+            elif dofname == "angle_y":
+                return R.from_matrix(jump.get_rotation()).as_euler("yxz", degrees=True)[0]
+            elif dofname == "angle_z":
+                return R.from_matrix(jump.get_rotation()).as_euler("zyx", degrees=True)[0]
+            else:
+                raise ValueError("Only dofname == 'angle_x', 'angle_y' or 'angle_z' are understood.")
+        except UserWarning:
+            raise AssertionError
 
     def is_reference_symmetry(self):
         """Checks if the symmetry file is reference based."""
@@ -588,7 +611,7 @@ class SymmetrySetup:
         stub2 = Stub(pose.conformation().downstream_jump_stub(sym_dof_jump_num(pose, jumpname)))
         return Jump(stub1, stub2)
 
-    def update_dofs_from_pose(self, pose, apply_dofs=False, assert_correct_overlap=True):
+    def update_dofs_from_pose(self, pose, apply_dofs=False):
         """Updates the dofs from current dofs in the pose."""
         assert self.reference_symmetric, "Only works for reference symmetry."
         for jumpname, dofinfo in self._dofs.items():
@@ -604,8 +627,6 @@ class SymmetrySetup:
                         self._dofs[jumpname][n][2] = new_dofval
         if apply_dofs:
             self.apply_dofs()
-        if assert_correct_overlap:
-            self.vrts_overlap_with_pose(pose)
 
     def get_coordinateframes(self, apply_dofs=True):
         """Returns a list of the coordinates frames with or without applied dofs.

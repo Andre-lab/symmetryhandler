@@ -35,8 +35,14 @@ def vector_angle(vec1, vec2, degrees=True):
     :param degrees: Return the results in degrees. If false, returns in radians
     :return float: The angle in degrees.
     """
-    cos_angle = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
-    val = np.arccos(np.clip(cos_angle, -1, 1))
+    denom = (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+    # if the denominator is zero this will return we should not perform the division and we return 0.0.
+    # This will happen without this if statement but it will throw a RuntimeWarning everytime it happens
+    if math.isclose(denom, 0.0):
+        return 0.0
+    else:
+        cos_angle = np.dot(vec1, vec2) / denom
+        val = np.arccos(np.clip(cos_angle, -1, 1))
     if degrees:
         return math.degrees(val)
     else: # radians

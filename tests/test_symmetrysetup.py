@@ -1,4 +1,5 @@
 
+
 def test_vrts_overlap_with_pose():
     from simpletestlib.test import setup_test
     from cubicsym.kinematics import randomize_all_dofs
