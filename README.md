@@ -1,4 +1,4 @@
-# SymmetryHandler
+# Symmetryhandler
 Simple utility library for working with symmetry and symmetry files in Rosetta.
 
 ## Handcrafting symmetry files. 
