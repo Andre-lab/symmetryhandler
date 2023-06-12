@@ -551,10 +551,10 @@ class SymmetrySetup:
                 self.recenter = True
             elif line[0] == "xyz":
                 vrt_name = line[1]
-                x = np.array(line[2].split(","), dtype=np.float)
-                y = np.array(line[3].split(","), dtype=np.float)
+                x = np.array(line[2].split(","), dtype=float)
+                y = np.array(line[3].split(","), dtype=float)
                 z = np.cross(x, y)
-                self.add_vrt((CoordinateFrame(vrt_name, x, y, z, np.array(line[4].split(","), dtype=np.float))))
+                self.add_vrt((CoordinateFrame(vrt_name, x, y, z, np.array(line[4].split(","), dtype=float))))
             elif line[0] == "connect_virtual":
                 self.add_jump(line[1], line[2], line[3])
             elif line[0] == "set_dof":
