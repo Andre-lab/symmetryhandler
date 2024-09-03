@@ -286,4 +286,12 @@ def set_dofs(pose, jumpinfo):
         for doftype, value in params.items():
             set_jumpdof_str_str(pose, jump, doftype, value)
 
-
+def randomize_all_dofs(pose, trans_scale, rot_scale):
+    """Randomizes all the dofs in the given range of +/- the passed value. It picks a value uniformly."""
+    for jump, dofs in get_dofs(pose).items():
+        for dof in dofs:
+            if "angle" in dof:
+                new_val = random.uniform(-rot_scale, rot_scale)
+            else:
+                new_val = random.uniform(-trans_scale, trans_scale)
+            perturb_jumpdof_str_str(pose, jump, dof, new_val)

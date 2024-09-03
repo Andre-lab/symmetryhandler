@@ -15,29 +15,16 @@ class CoordinateFrame:
 
     def __init__(self, name, x=None, y=None, z=None, orig=None, generate_z_from_xy=False):
         self.name = name
-
-        if type(x) is list:
-            self._vrt_x = np.array(x)
-        else:
-            self._vrt_x = x
-
-        if type(y) is list:
-            self._vrt_y = np.array(y)
-        else:
-            self._vrt_y = y
-
+        self._vrt_x = np.array(x, dtype=float)
+        self._vrt_y = np.array(y, dtype=float)
         if generate_z_from_xy:
             self.generate_z()
         else:
-            if type(z) is list:
-                self._vrt_z = np.array(z)
-            else:
-                self._vrt_z = z
+            self._vrt_z = np.array(z, dtype=float)
+        self._vrt_orig = np.array(orig, dtype=float)
 
-        if type(orig) is list:
-            self._vrt_orig = np.array(orig)
-        else:
-            self._vrt_orig = orig
+    def translate(self, trans_vector):
+        self._vrt_orig += np.array(trans_vector)
 
     def generate_z(self):
         self.vrt_z = np.cross(self.vrt_x, self.vrt_y)

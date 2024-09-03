@@ -28,6 +28,8 @@ from io import StringIO
 from pyrosetta.rosetta.std import istringstream
 import tempfile
 import uuid
+import yaml
+from itertools import count
 
 class SymmetrySetup:
     """A symmetric setup that stores the symmetry information used internally in Rosetta.
@@ -39,11 +41,11 @@ class SymmetrySetup:
     That is, a symmetry definition where the following conditions apply:
         1. Each degree of freedom has 1 dedicated and unique jump.
         2. Each jump have their 2 associated VRTs (stubs) in the same coordinate frame.
-           That is, the x, y, z directions are the same but not nescesarily the origo.
+           That is, the x, y, z directions are the same but not necessarily the Origo.
     With such a definition the changes in the degrees of freedom can be tracked.
     """
 
-    def __init__(self, file=None, pose=None, symmetry_name=None):
+    def __init__(self, symdef=None, pose=None, symmetry_name=None):
         """Initializes the Symmetric setup.
 
         :param str symmetry_name: name of the symmetric setup.
@@ -58,22 +60,131 @@ class SymmetrySetup:
         self.symmetry_name = symmetry_name
         self.anchor = None
         self.recenter = None
-        self.energies = []
-        self._jumps = {}
-        self._jumpgroups = {}
-        self._dofs = {}
-        self._vrts = []
-        self._init_vrts = None
+        self.energies = None
+        self.jumps = {}
+        self.jumpgroups = {}
+        self.dofs = {}
+        self.vrts = []
+        self.init_vrts = None
         self.reference_symmetric = None
         self.actual_anchor_residue = None
         self.headers = {}
-        if file is not None:
-            self.read_from_file(file)
+        if symdef is not None:
+            self.read_from_file(symdef)
         elif pose is not None:
-            if self.pose_has_symmetry_comment(pose):
-                self.read_from_pose_comment(pose)
-            else:
-                raise ValueError(f"The pose is not symmetric and no SYMMETRY comment is present in the file.")
+            assert self.pose_has_symmetry_comment(pose), "The Pose must contain a symmetry comment"
+            self.read_from_pose_comment(pose)
+
+    def get_n_dofs(self):
+        """Get the number of dofs in the symmetry setup."""
+        n_dofs = 0
+        for jump, dofs in self.dofs.items():
+            for _ in dofs:
+                n_dofs += 1
+        return n_dofs
+
+    def get_jump_clones(self, jump):
+        """Gets all the clones of the jump based on which jumpgroup it is associated with."""
+        for group, jumps in self.jumpgroups.items():
+            if jump in jumps:
+                return group, jumps #[j for j in jumps if j != jump]
+        raise ValueError("No Jump clones found")
+
+    def get_vrt_downstream_of_vrt(self, vrt):
+        """Gets the vrt that is connected downstream from the vrt"""
+        for jump, vrt_pair in self.jumps.items():
+            if vrt_pair[0] == vrt:
+                return vrt_pair[1]
+
+    def get_vrt_upstream_of_vrt(self, vrt):
+        """Gets the vrt that is connected upstream from the vrt"""
+        for jump, vrt_pair in self.jumps.items():
+            if vrt_pair[1] == vrt:
+                return vrt_pair[0]
+
+    def get_jump_upstream_from_vrt(self, vrt):
+        """Gets the jump that is connected downstream from the vrt"""
+        for jump, vrt_pair in self.jumps.items():
+            if vrt_pair[1] == vrt:
+                return jump
+
+    def get_jump_downstream_from_vrt(self, vrt):
+        """Gets the jump that is connected upstream from the vrt"""
+        for jump, vrt_pair in self.jumps.items():
+            if vrt_pair[0] == vrt:
+                return jump
+
+    # inside '[ ]' is what we are inserting:
+    # if single: vrt_from [-> vrt_()ref -> vrt() -> ] vrt_to
+    # if multiple: vrt_from [ -> vrt_()ref -> vrt() -> vrt_()ref -> vrt() ->] vrt_to
+    def convert_to_reference_symmetry(self):
+        """Convert regular Rosetta symmmetry to reference based symmetry."""
+        new_dofs, new_jumpgroups, jumpgroup_ref = {}, {}, 0
+        vrt_modified_at_subunit_map = {}
+        for jump_org, dofs in self.dofs.items():
+            jumpgroup_ref += 1
+            jumpgroup, jump_clones = self.get_jump_clones(jump_org)
+            for jump in jump_clones:
+                vrt_from_name, vrt_to_name = self.jumps[jump]
+
+                for n, (xyz, typ, val) in enumerate(dofs):
+                    suffix = f"_{xyz}_{'t' if typ == 'translation' else 'r'}"
+
+                    # copy the current VRTs and add them to the list of vrts
+                    vrt_from_clean_name = vrt_from_name.replace("_x", "").replace("_y", "").replace("_z", "").replace("_r", "").replace("_t", "")
+                    vrt_xyz_ref = self.copy_vrt(vrt_from_name, f"{vrt_from_clean_name}{suffix}ref")
+                    vrt_xyz = self.copy_vrt(vrt_from_name, f"{vrt_from_clean_name}{suffix}")
+                    self.init_vrts.insert([v.name for v in self.init_vrts].index(vrt_from_name), vrt_xyz_ref)
+                    self.init_vrts.insert([v.name for v in self.init_vrts].index(vrt_xyz_ref.name), vrt_xyz)
+                    self.vrts = self.init_vrts
+
+                    # connect the new vrts with a jumpname
+                    jump_clean_name = jump.replace("to_subunit", "before_subunit")
+                    jump_new = f"{jump_clean_name}{suffix}"
+                    self.jumps[jump_new] = [vrt_xyz_ref.name, vrt_xyz.name]
+                    jump_ref = f"{jump_clean_name}{suffix}_ref"
+                    self.jumps[jump_ref] = [vrt_from_name, vrt_xyz_ref.name]
+                    # reconnect the upstream/downstream jump
+                    self.jumps[jump] = [vrt_xyz.name, vrt_to_name]
+
+                    if vrt_to_name == "SUBUNIT":
+                        vrt_modified_at_subunit_map[vrt_from_name] = vrt_xyz.name
+
+                    # If there are more dofs, we need to reset vrt_from
+                    vrt_from_name = vrt_xyz.name
+
+                    # make the dofs and jumpgroups
+                    if jump == jump_org:
+                        new_dofs[jump_new] = [[xyz, typ, val]]
+                    new_jumpgroup = f"JUMPGROUP{jumpgroup_ref + n}"
+                    if not new_jumpgroup in new_jumpgroups:
+                        new_jumpgroups[new_jumpgroup] = [jump_new]
+                    else:
+                        new_jumpgroups[new_jumpgroup].append(jump_new)
+            jumpgroup_ref += n
+
+        # modifiy the E-lines
+        for old, new in vrt_modified_at_subunit_map.items():
+            self.energies = self.energies.replace(old, new)
+
+        self.dofs = new_dofs
+        self.jumpgroups = new_jumpgroups
+        self._set_vrts_to_init_vrts()
+        # sanity check
+        assert self.is_dof_master_jumps()
+
+        # create the new reference VRT
+        # have to modify the jump
+        #self.jumps so that it disconnects from the old and connects to the new one
+        # then add the new jump inbetween
+
+        #  VRTHFfold111_x_rref or tref
+
+    def extract_headers(self):
+        """Extracts headers from the symmetry file"""
+        righthanded = self.headers.get("righthanded", None)
+        self.righthanded = yaml.safe_load(righthanded) if righthanded is not None else None
+        self.headers.get("normalized", None)
 
     def pose_has_symmetry_comment(self, pose):
         try:
@@ -95,7 +206,7 @@ class SymmetrySetup:
     def get_map_vrt_to_pose_resi(self, pose):
         """Maps the virtual residue names to the pose residue numbers."""
         vrt_pose_resi = {}
-        for jump, (vrt_up, vrt_down) in self._jumps.items():
+        for jump, (vrt_up, vrt_down) in self.jumps.items():
             vrt_up_resi = pose.fold_tree().upstream_jump_residue(sym_dof_jump_num(pose, jump))
             vrt_down_resi = pose.fold_tree().downstream_jump_residue(sym_dof_jump_num(pose, jump))
             if not vrt_up in vrt_pose_resi:
@@ -184,14 +295,12 @@ class SymmetrySetup:
         is_reference_symmetry = True
         # 1. condition: check that all dofs have unique jumps
         jumps_used = []
-        for jumpname in self._dofs.keys():
-            if jumpname in jumps_used:
-                is_reference_symmetry = False
-            else:
-                jumps_used.append(jumpname)
+        for _, dofs in self.dofs.items():
+            if len(dofs) > 1:
+                return False
         # 2. condition: check that the vrts have the same coordinate frame
-        for jumpname, params in self._dofs.items():
-            down, up = self._jumps[jumpname]
+        for jumpname, params in self.dofs.items():
+            down, up = self.jumps[jumpname]
             if up == "SUBUNIT":
                 continue
             downstream_vrt = self.get_vrt(down)
@@ -208,17 +317,18 @@ class SymmetrySetup:
                     is_reference_symmetry *= upstream_vrt.identical_x(downstream_vrt)
                 elif params[0][0] == "z":
                     is_reference_symmetry *= upstream_vrt.identical_z(downstream_vrt)
+        # todo: condition 3. check that the vrt associated with the subunit is located at the subunit itself.
         return is_reference_symmetry
 
     def reset_all_dofs(self):
         """Sets all the values of every dof to 0."""
-        for jn, vl in self._dofs.items():
+        for jn, vl in self.dofs.items():
             for v in vl:
                 v[2] = 0.0
 
     def reset_jumpdofs(self, jumpname):
         """Sets all the values of dofs belonging to a Jump to 0."""
-        for dof in self._dofs[jumpname]:
+        for dof in self.dofs[jumpname]:
             dof[2] = 0.0
 
     def set_dof(self, jumpname, dof, doftype, value):
@@ -231,12 +341,12 @@ class SymmetrySetup:
         :return:
         """
         assert "angle" not in dof, "Only use 'x', 'y' or 'z'."
-        for jn, vl in self._dofs.items():
+        for jn, vl in self.dofs.items():
             if jn == jumpname:
                 for n, v in enumerate(vl):
                     t_dof, t_doftype, _ = v
                     if t_dof == dof and t_doftype == doftype:
-                        self._dofs[jn][n][2] = value
+                        self.dofs[jn][n][2] = value
                         return
         raise ValueError(f"Cannot set {jumpname}, {dof}, {doftype} because it does not exist!")
 
@@ -245,16 +355,16 @@ class SymmetrySetup:
 
         :param symmetryhandler.coordinateframe.CoordinateFrame vrt: name of the CoordinateFrame.
         """
-        self._vrts.append(vrt)
+        self.vrts.append(vrt)
 
     def remove_vrt(self, name):
         """Removes virtual residue coordinate systems (vrts) from the symmetry setup object.
 
         :param str name: name of vrt.
         """
-        for vrt in self._vrts:
+        for vrt in self.vrts:
             if name == vrt:
-                self._vrts.remove(name)
+                self.vrts.remove(name)
 
     def add_jump(self, name, src_name, dest_name):
         """Creates a jump between shapedock (source) and dest (destination).
@@ -265,14 +375,14 @@ class SymmetrySetup:
         :param str src_name: name of source vrt.
         :param str dest_name: name of destination vrt.
         """
-        if name in self._jumps:
+        if name in self.jumps:
             raise ValueError(f"Name of jump {name} does already exist")
-        vrt_names = [vrt.name for vrt in self._vrts] + ['SUBUNIT']
+        vrt_names = [vrt.name for vrt in self.vrts] + ['SUBUNIT']
         if not src_name in vrt_names:
             raise ValueError(f"Name of source vrt: {src_name} does not exist")
         if not dest_name in vrt_names:
             raise ValueError(f"Name of destination vrt: {dest_name} does not exist")
-        self._jumps[name] = [src_name, dest_name]
+        self.jumps[name] = [src_name, dest_name]
 
     def remove_jump(self, name):
         """Removes a jump in the tree with a given name.
@@ -281,9 +391,9 @@ class SymmetrySetup:
 
         :param str name: name of the jump.
         """
-        if not name in self._jumps:
+        if not name in self.jumps:
             raise ValueError(f"Name of jump: {name} does not exist")
-        self._jumps.pop(name)
+        self.jumps.pop(name)
 
     def add_jumpgroup(self, name, *jump_names):
         """Creates a jumpgroup.
@@ -293,22 +403,22 @@ class SymmetrySetup:
         :param str name: name of jumpgroup.
         :param str jump_names: names of jumps to include in the jumpgroup. The first name will be the master jump.
         """
-        if name in self._jumpgroups:
+        if name in self.jumpgroups:
             raise ValueError(f"Name of jumpgroup {name} already exist")
-        jumps = self._jumps.keys()
+        jumps = self.jumps.keys()
         for jump_name in jump_names:
             if jump_name not in jump_names:
                 raise ValueError("\"{}\" does not exist".format(jump_name))
-        self._jumpgroups[name] = list(jump_names)
+        self.jumpgroups[name] = list(jump_names)
 
     def remove_jumpgroup(self, name):
         """Removes a jumpgroup with a given name.
 
         :param str name: name of the jumpgroup.
         """
-        if not name in self._jumpgroups:
+        if not name in self.jumpgroups:
             raise ValueError(f"Name of jump: {name} does not exist")
-        self._jumpgroups.pop(name)
+        self.jumpgroups.pop(name)
 
     def add_dof(self, name, axes, degree, value=None):
         """Creates a degree of freedom for a jump.
@@ -321,25 +431,25 @@ class SymmetrySetup:
         :param float value: the value of the degree of freedom.
         Ångström is assumed for translation and degrees for rotation.
         """
-        if not name in self._jumps:
+        if not name in self.jumps:
             raise ValueError(f"Name of jump: {name} does not exist")
 
         if not axes in 'xyz':
             raise ValueError("axes should either be 'x', 'y' or 'z' ")
         if not degree in ("translation", "rotation"):
             raise ValueError("axes should either be \"translation\", \"rotation\" ")
-        if not name in self._dofs.keys():
-            self._dofs[name] = []
-        self._dofs[name].append([axes, degree, value])
+        if not name in self.dofs.keys():
+            self.dofs[name] = []
+        self.dofs[name].append([axes, degree, value])
 
     def remove_dofs(self, name):
         """Removes dofs for a given jump.
 
         :param str name: name of the jump
         """
-        if not name in self._dofs:
+        if not name in self.dofs:
             raise ValueError(f"Name of jump: {name} does not exist")
-        self._dofs.pop(name)
+        self.dofs.pop(name)
 
     def get_vrt(self, name):
         """Returns the CoordinateFrame with the given name.
@@ -347,7 +457,7 @@ class SymmetrySetup:
         :param str name: name of the CoordinateFrame.
         :return str vrt: the CoordinateFrame with the parsed name.
         """
-        for vrt in self._vrts:
+        for vrt in self.vrts:
             if name == vrt.name:
                 return vrt
         raise ValueError(name + " does not exist")
@@ -358,7 +468,7 @@ class SymmetrySetup:
         :param str name: name of the CoordinateFrame.
         :return str vrt: the CoordinateFrame with the parsed name.
         """
-        for vrt in self._init_vrts:
+        for vrt in self.init_vrts:
             if name == vrt.name:
                 return vrt
         raise ValueError(name + " does not exist")
@@ -370,14 +480,14 @@ class SymmetrySetup:
         :return: a list of vrt names.
         """
         vrts = []
-        vrts.append(self._jumps[jump][1])
+        vrts.append(self.jumps[jump][1])
         dead_end = False
         while not dead_end:
-            for counter, vrt_pair in enumerate(self._jumps.values(), 1):
+            for counter, vrt_pair in enumerate(self.jumps.values(), 1):
                 if vrt_pair[0] in vrts:
                     next_vrt = vrt_pair[1]
                     vrts.append(next_vrt)
-                if counter == len(self._jumps.values()):
+                if counter == len(self.jumps.values()):
                     dead_end = True
         return vrts
 
@@ -387,7 +497,7 @@ class SymmetrySetup:
         :return list: list of the names of the master jumps.
         """
         master_jumps = []
-        for jumpgroup, jumps in self._jumpgroups.items():
+        for jumpgroup, jumps in self.jumpgroups.items():
             master_jumps.append(jumps[0])
         return master_jumps
 
@@ -396,7 +506,7 @@ class SymmetrySetup:
 
         :return bool: true/false.
         """
-        for jump in self._dofs:
+        for jump in self.dofs:
             if jump not in self.get_master_jumps():
                 return False
         return True
@@ -414,21 +524,21 @@ class SymmetrySetup:
                 symdef += f"#{header}" + "\n"
         symdef += "symmetry_name " + self.symmetry_name + "\n"
         symdef += "E = " + self.energies + "\n"
-        symdef += "anchor_residue " + (str(self.actual_anchor_residue + anchor_moved_resnums) if use_stored_anchor else self.anchor) + "\n"
+        symdef += "anchor_residue " + (str(self.actual_anchor_residue + anchor_moved_resnums) if use_stored_anchor else str(self.anchor) ) + "\n"
         if self.recenter:
             symdef += "recenter" + "\n"
         symdef += "virtual_coordinates_start" + "\n"
         # use either the potentially modified or the unapplied vrts to specifiy
-        if use_current_vrt_positions or self._init_vrts is None:
-            for vrt in self._vrts:
+        if use_current_vrt_positions or self.init_vrts is None:
+            for vrt in self.vrts:
                 symdef += str(vrt) + "\n"
         else:
-            for vrt in self._init_vrts:
+            for vrt in self.init_vrts:
                 symdef += str(vrt) + "\n"
         symdef += "virtual_coordinates_stop" + "\n"
-        for name, connection in self._jumps.items():
+        for name, connection in self.jumps.items():
             symdef += "connect_virtual " + name + " " + connection[0] + " " + connection[1] + "\n"
-        for jump, dofs in self._dofs.items():
+        for jump, dofs in self.dofs.items():
             symdef += "set_dof " + jump
             for dof in dofs:
                 if dof[1] == "translation":
@@ -438,11 +548,11 @@ class SymmetrySetup:
                 if dof[2] is not None:
                     symdef += "(" + str(dof[2]) + ")"
             symdef += "\n"
-        for i, (name, jumps) in enumerate(self._jumpgroups.items(), 1):
+        for i, (name, jumps) in enumerate(self.jumpgroups.items(), 1):
             symdef += "set_jump_group " + name
             for jump in jumps:
                 symdef += " " + jump
-            if not i == len(self._jumpgroups):
+            if not i == len(self.jumpgroups):
                 symdef += "\n"
         return symdef
 
@@ -457,7 +567,7 @@ class SymmetrySetup:
 
     def get_dof_value(self, jumpname:str, dof:str, doftype:str):
         """Get the value for the dof"""
-        for idof in self._dofs[jumpname]:
+        for idof in self.dofs[jumpname]:
             if idof[0] == dof and idof[1] == doftype:
                 return idof[2]
         raise ValueError(f"value for jumpname:{jumpname}, dof:{dof}, doftype:{doftype} not found!")
@@ -614,7 +724,7 @@ class SymmetrySetup:
     def update_dofs_from_pose(self, pose, apply_dofs=False):
         """Updates the dofs from current dofs in the pose."""
         assert self.reference_symmetric, "Only works for reference symmetry."
-        for jumpname, dofinfo in self._dofs.items():
+        for jumpname, dofinfo in self.dofs.items():
             jump = self.get_jump(pose, jumpname)
             for dofname, doftype, _ in dofinfo:
                 if doftype == "translation":
@@ -622,9 +732,9 @@ class SymmetrySetup:
                 else: # rotation
                     assert doftype == "rotation"
                     new_dofval = self.get_rot_from_jump(jump, "angle_" + dofname)
-                for n, (t_dofname, t_doftype, _) in enumerate(self._dofs[jumpname]):
+                for n, (t_dofname, t_doftype, _) in enumerate(self.dofs[jumpname]):
                     if t_dofname == dofname and t_doftype == doftype:
-                        self._dofs[jumpname][n][2] = new_dofval
+                        self.dofs[jumpname][n][2] = new_dofval
         if apply_dofs:
             self.apply_dofs()
 
@@ -635,12 +745,19 @@ class SymmetrySetup:
                            the symmetry definition file.
         :return:
         """
-        if apply_dofs and len(self._dofs) != 0:
+        if apply_dofs and len(self.dofs) != 0:
             symmetry_setup = copy.deepcopy(self)
             symmetry_setup.apply_dofs()
         else:
             symmetry_setup = self
-        return symmetry_setup._vrts
+        return symmetry_setup.vrts
+
+    def get_symmetry_type(self):
+        """Retrieves the symmetry type stored in the header."""
+        if self.headers.get("symmetry_type"):
+            return self.headers.get("symmetry_type")[0]
+        else:
+            return "UNKNOWN"
 
     def make_symmetric_pose(self, pose, use_stored_anchor=False, anchor_moved_resnums=0):
         """Symmetrizes the pose with the symmetrysetup (internal symmetry definition)."""
@@ -697,17 +814,17 @@ class SymmetrySetup:
 
     def _set_init_vrts(self):
         """Everytime we apply the dofs we need to start from the initial vrts, therefore we save the vrts from the intial state."""
-        self._init_vrts = copy.deepcopy(self._vrts)
+        self.init_vrts = copy.deepcopy(self.vrts)
 
     def _set_vrts_to_init_vrts(self):
         """Sets the current vrts to be of the initial vrts."""
-        if self._init_vrts is None:
+        if self.init_vrts is None:
             raise ValueError("Initial vrts have not been set. These needs to be set before applying dofs. They can be set through: "
                              "1. Initializing the class with either a pose or a symdef file."
                              "2. Manual call to _set_init_vrts() if you are building a SymmetrySetup from scratch."
                              "3. Call to read_from_pose_comment() "
                              "4. Call to read_from_file()." )
-        self._vrts = copy.deepcopy(self._init_vrts)
+        self.vrts = copy.deepcopy(self.init_vrts)
 
     def apply_dofs(self):
         """Applies the translational and rotational degrees of freedom specified in the symmetry definition file."""
@@ -716,9 +833,9 @@ class SymmetrySetup:
         # set the self.vrts to be the unapplied_vrts
         self._set_vrts_to_init_vrts()
 
-        for jump_to_apply_dof_to, dofs in self._dofs.items():
+        for jump_to_apply_dof_to, dofs in self.dofs.items():
             # find the jumpgroup the master jump degree of freedom belongs too
-            for jumpgroup in self._jumpgroups.values():
+            for jumpgroup in self.jumpgroups.values():
                 # check that the dof jump and the first entry (aka master jump) in the jumpgroup is the same
                 # they could be out of order and therefore the first defined jump in set_dof might not be the
                 # same in set_jump_group. Keep iterating until it is the same.
@@ -731,7 +848,7 @@ class SymmetrySetup:
                 # find all downstream vrt names connected to the jump
                 vrts_to_apply_dof_to = self.get_downstream_connections(jump)
                 #  Find the reference vrt that the dofs should be applied from
-                vrt_reference_name = self._jumps[jump][0]
+                vrt_reference_name = self.jumps[jump][0]
                 vrt_reference = self.get_vrt(vrt_reference_name)
 
                 # now apply the dofs vrts_to_apply_dof_to
@@ -812,7 +929,7 @@ class SymmetrySetup:
         # understand the how to change the objects in a list.
 
         # if user want to appy dofs and dofs are set then apply the dofs
-        if apply_dofs and len(self._dofs) != 0:
+        if apply_dofs and len(self.dofs) != 0:
             symmetry_setup = copy.deepcopy(self)
             symmetry_setup.apply_dofs()
         else:
@@ -826,7 +943,7 @@ class SymmetrySetup:
         z_pos = 1.2
         axes_norm = 0.3
 
-        for counter, vrt in enumerate(symmetry_setup._vrts, 1):
+        for counter, vrt in enumerate(symmetry_setup.vrts, 1):
             string += "obj{0} = [SPHERE, {1}, r," \
                       "CYLINDER, {1}, {2}, w, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0," \
                       "CYLINDER, {1}, {3}, w, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0," \
@@ -877,7 +994,7 @@ class SymmetrySetup:
             # CGO styles
             w = 0.06  # cylinder width
 
-            for counter2, (jump, vrts) in enumerate(symmetry_setup._jumps.items(), counter):
+            for counter2, (jump, vrts) in enumerate(symmetry_setup.jumps.items(), counter):
                 vrt_from = symmetry_setup.get_vrt(vrts[0])
                 if vrts[1] == "SUBUNIT":
                     continue
@@ -908,11 +1025,3 @@ class SymmetrySetup:
         file = open(name, 'w')
         file.write(self.__make_visualization_str(apply_dofs, mark_jumps))
         file.close()
-
-    # def add_angle_vrt(self, pose):
-    #     self.update_dofs_from_pose(pose)
-    #     apose = self.make_asymmetric_pose(pose, dont_reset=["JUMPHFfold1111_subunit"])
-    #     # get the attachmentpoint for
-    #     vrt = CoordinateFrame("VRT_angle_z_controller"), [1, 0, 0], [0, 1, 0], [0, 0, 1], np.array(line[4].split(","), dtype=np.float)))
-    #     self.add_vrt(vrt)
-    #     ...
