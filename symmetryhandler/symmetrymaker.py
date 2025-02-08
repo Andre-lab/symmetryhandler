@@ -14,6 +14,8 @@ from symmetryhandler.mathfunctions import rotation_matrix_from_vector_to_vector 
 from symmetryhandler.symmetrysetup import SymmetrySetup
 from Bio.PDB import MMCIFParser, PDBIO, Select
 import gzip
+import os
+import sys
 
 def cif2pdb(ciffile, structid, outname):
     parser = MMCIFParser()
@@ -38,7 +40,7 @@ class SymmetryMaker:
     print(make_symmdef_file)
     # assert make_symmdef_file.exists()
 
-    def __init__(self, struct, point_group, chains, out, a, i=None, b=None, align_struct=None):
+    def __init__(self, struct, point_group, chains, out, a, i=None, b=None, align_struct=None, custom_energy=None):
         self.struct_file = struct
         self.point_group = point_group
         self.out = out
@@ -46,12 +48,13 @@ class SymmetryMaker:
         self.i = " ".join(i)
         self.b = b
         self.chains_type = chains
+        self.custom_energy = custom_energy
         if align_struct is not None:
             parser = PDBParser(QUIET=True)
             self.align_struct = parser.get_structure("align_struct", align_struct.split("-")[0])
             self.align_chain = align_struct.split("-")[1]
         else:
-            self.align_struct, self.align_chain  = None, None
+            self.align_struct, self.align_chain = None, None
 
     def get_center_of_mass_of_chain(self, chain):
         # Initialize total mass and center of mass vector
@@ -129,13 +132,29 @@ class SymmetryMaker:
         # this (.transform()) right multiplies and CoordinateFrame.rotate() left multiplies so we have to be carefull.
         # This is the right order, for right multiplication as current_z_axis should go onto [0, 0, 1]
         rot = rvv( [0, 0, 1], current_z_axis)
+        rot = rvv( [0, 0, 1], current_z_axis)
         full_structure.transform(rot=rot, tran = [0, 0, 0])
 
     def align_along_x(self, full_structure):
+        # Old abonded method to just use the center of mass
         # move the center of mass of chain A so it points towards the x axis
-        chain_a = full_structure[0][self.a]
-        com = self.get_center_of_mass_of_chain(chain_a)
-        rot = rvv( [1, 0, 0 ], com) # align
+        # chain_a = full_structure[0][self.a]
+        # com = self.get_center_of_mass_of_chain(chain_a)
+        # # project it onto the xy plane
+        # com_proj = vector_projection(com, [1, 1, 0])
+        # rot = rvv( [1, 0, 0 ], com_proj) # align
+
+        # i am doing it with the residue center of mass' CA atom instead. This means that the jump connecting the
+        # main subunit should point directly along the x-axis
+        io = PDBIO()
+        io.set_structure(full_structure)
+        with tempfile.NamedTemporaryFile(mode='w+') as f:
+            io.save(f, ChainSelect(self.i))
+            pose_a = pose_from_file(f.name)
+            anchor_resi = self.get_anchor_residue(pose_a)
+            anchor_resi_atom_CA_xyz = list(pose_a.residue(anchor_resi).atom("CA").xyz())
+        proj = vector_projection(anchor_resi_atom_CA_xyz, [1, 1, 0])
+        rot = rvv( [1, 0, 0 ], proj) # align
         full_structure.transform(rot=rot, tran = [0, 0, 0])
 
     def get_structure(self):
@@ -143,6 +162,15 @@ class SymmetryMaker:
         temp_struct, temp_sym = self.make_regular_symmetry()
         parser = PDBParser()
         full_structure = parser.get_structure('Protein', temp_struct)
+
+        # now that we have symmetrized it, make_symdef_file.pl changes the chain names order. Therefore we
+        # now have to change to a new order.
+        # For cyclical symmetries it goes A->B->C->D Alphabetically
+        if self.point_group == "C":
+            self.a = "A"
+            self.i = "B"
+        else:
+            raise NotImplementedError
 
         full_structure = self.align(temp_sym, full_structure)
 
@@ -154,20 +182,21 @@ class SymmetryMaker:
         with tempfile.NamedTemporaryFile(mode='w+') as f:
             io.save(f, ChainSelect(self.a))
             pose_a = pose_from_file(f.name)
-        i_pose, b_pose = None, None
+        pose_i, b_pose = None, None
         # extract i pose (if defined)
         if self.i is not None:
             io.set_structure(full_structure)
             with tempfile.NamedTemporaryFile(mode='w+') as f:
                 io.save(f, ChainSelect(self.i))
-                i_pose = pose_from_file(f.name)
+                pose_i = pose_from_file(f.name)
         # extract b pose (if defined)
         if self.b is not None:
             io.set_structure(full_structure)
             with tempfile.NamedTemporaryFile(mode='w+') as f:
+                raise NotImplementedError("need to figure out what b is. Convention is for make_symdef_file.")
                 io.save(f, ChainSelect(self.b))
-                b_pose = pose_from_file(f.name)
-        return full_structure, pose_a, i_pose, b_pose
+                pose_i = pose_from_file(f.name)
+        return full_structure, pose_a, pose_i, pose_i
 
     def get_geometric_center(self, struct):
         xyzs = []
@@ -302,7 +331,10 @@ class SymmetryMaker:
 
         # set name, energy lines, anchor residue, and headers
         setup.symmetry_name = f"{Path(self.struct_file).stem}_ref_symm"
-        setup.energies = f"{num_chains}*VRT1_sds + " + " + ".join([f"{multiplier}*(VRT1_sds:VRT{i}_sds)" for i in range(1, n_chains_to_include + 1)])
+        if self.custom_energy is not None:
+            setup.energies = self.custom_energy
+        else:
+            setup.energies = f"{num_chains}*VRT1_sds + " + " + ".join([f"{multiplier}*(VRT1_sds:VRT{i}_sds)" for i in range(2, n_chains_to_include + 1)])
         setup.anchor = anchor_resi
         setup.headers["symmetry_type"] = f"C{num_chains}"
         setup.headers["actual_chains"] = num_chains
@@ -317,7 +349,6 @@ class SymmetryMaker:
         a_pose.translate(-anchor_CA_atom_pose_a)
         a_pose.dump_pdb(f"{self.out}/{Path(self.struct_file).stem}_ref_INPUT.pdb")
 
-
     def make_regular_symmetry(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(f"{d}/input.pdb")
@@ -326,11 +357,12 @@ class SymmetryMaker:
                 command = f"cd {d} && {self.make_symmdef_file} -p {p} -a {self.a} -i {self.i} > symdef.symm"
             else:
                 raise NotImplementedError
-            subprocess.run(command, shell=True)
+            subprocess.run(command, shell=True, check=True, stdout=sys.stdout, stderr=sys.stderr)
             # move struct    file
             symmetrical_struct = Path(f"{d}/{p.stem}_symm.pdb")
             new_symmetrical_struct = f"{self.out}/{symmetrical_struct.name}"
-            shutil.move(symmetrical_struct, new_symmetrical_struct)
+            shutil.copy(symmetrical_struct, new_symmetrical_struct)
+            os.remove(symmetrical_struct)
             # move symmetrical file
             symdef = f"{d}/symdef.symm"
             ss = SymmetrySetup(symdef=symdef)
