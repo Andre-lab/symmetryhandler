@@ -19,6 +19,7 @@ def main():
                                         choices=("minimal", "unique", "full"), default="full")
     parser.add_argument('-align_struct', help="Align the structure to this pdb. Example 'file.pdb-A' will align "
                                               "the output symmetry to file.pdb and the main chain onto A.", type=str)
+    parser.add_argument('-custom_energy', help="Custom energy line", type=str)
     parser.add_argument('-a', help="make_symmdef_file.pl commands", nargs="+", type=str)
     parser.add_argument('-i', help="make_symmdef_file.pl commands", nargs="+", type=str)
     parser.add_argument('-b', help="make_symmdef_file.pl commands", nargs="+", type=str)
@@ -26,7 +27,8 @@ def main():
 
     init()
 
-    sm = SymmetryMaker(args.struct, args.point_group, args.chains, args.out, args.a, args.i, args.b, args.align_struct)
+    sm = SymmetryMaker(args.struct, args.point_group, args.chains, args.out, args.a, args.i,
+                       args.b, args.align_struct, args.custom_energy)
     if args.point_group.upper() == "C":
         sm.make_cyclical_symmetry()
 
