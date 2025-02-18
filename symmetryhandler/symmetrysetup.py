@@ -755,9 +755,10 @@ class SymmetrySetup:
     def get_symmetry_type(self):
         """Retrieves the symmetry type stored in the header."""
         if self.headers.get("symmetry_type"):
-            return self.headers.get("symmetry_type")[0]
+            return self.headers.get("symmetry_type")
         else:
-            return "UNKNOWN"
+            raise ValueError("UNKOWN SYMMETRYTYPE")
+
 
     def make_symmetric_pose(self, pose, use_stored_anchor=False, anchor_moved_resnums=0):
         """Symmetrizes the pose with the symmetrysetup (internal symmetry definition)."""
