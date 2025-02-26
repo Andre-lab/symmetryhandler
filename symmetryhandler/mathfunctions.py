@@ -23,7 +23,13 @@ def rotation_matrix_from_vector_to_vector(v1, v2):
         warnings.warn("v1 and v2 are similar and an identity rotation matrix is returned!")
         return np.identity(3)
     # actual calculation
-    axis = np.cross(v1,v2)
+    axis = np.cross(v1, v2)
+    if math.isclose(np.linalg.norm(axis), 0):
+        warnings.warn("v1 and v2 are 180 degrees apart; choosing an arbitrary perpendicular rotation axis.")
+        # Pick an arbitrary perpendicular axis
+        arbitrary_axis = np.array([1, 0, 0]) if abs(v1[0]) < abs(v1[1]) else np.array([0, 1, 0])
+        axis = np.cross(v1, arbitrary_axis)
+        axis /= np.linalg.norm(axis)  # Normalize
     angle = vector_angle(v1, v2)
     return rotation_matrix(axis, angle)
 
