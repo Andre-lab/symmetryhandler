@@ -29,8 +29,7 @@ def main():
 
     sm = SymmetryMaker(args.struct, args.point_group, args.chains, args.out, args.a, args.i,
                        args.b, args.align_struct, args.custom_energy)
-    if args.point_group.upper() == "C":
-        sm.make_cyclical_symmetry()
+    sm.apply()
 
 if __name__ == "__main__":
     main()
